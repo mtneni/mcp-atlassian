@@ -1077,10 +1077,99 @@ RATE_LIMIT_IP_REQUESTS=200
 RATE_LIMIT_TOOL_REQUESTS=30
 ```
 
-**Rate Limit Behavior**:
-- Returns HTTP 429 (Too Many Requests) when limit exceeded
-- Includes `Retry-After` header with seconds to wait
-- Rate limit violations are automatically logged to audit trail
+**Behavior**:
+- Rate limits are checked before processing requests
+- HTTP 429 (Too Many Requests) response when limit exceeded
+- `Retry-After` header indicates when to retry
+- All rate limit violations are logged in audit logs
+
+### Role-Based Access Control (RBAC)
+
+**Fine-Grained Access Control** with role-based permissions and Entra ID group integration:
+- Role-based permissions (Viewer, Editor, Admin)
+- Entra ID group mapping to roles
+- Per-user role overrides
+- Resource-level restrictions (projects, spaces, repos)
+- Tool-level access control
+- Automatic permission checks with caching
+
+**Configuration**:
+```bash
+# Enable RBAC (default: false)
+RBAC_ENABLED=true
+
+# Default role for users not in any group (default: viewer)
+RBAC_DEFAULT_ROLE=viewer
+
+# Map Entra ID groups to roles (comma-separated)
+# Format: "group1:role1,group2:role2"
+RBAC_GROUP_ROLES="jira-viewers@company.com:viewer,jira-editors@company.com:editor,jira-admins@company.com:admin"
+
+# User-specific role overrides (JSON format)
+# Format: '{"user@example.com": ["role1", "role2"]}'
+RBAC_USER_ROLES='{"admin@company.com": ["admin"], "contractor@company.com": ["viewer"]}'
+
+# Resource restrictions (JSON format)
+# Format: '{"user@example.com": {"jira_projects": ["PROJ-123"], "confluence_spaces": ["ENG"]}}'
+RBAC_RESOURCE_RESTRICTIONS='{"contractor@company.com": {"jira_projects": ["PROJ-123"], "confluence_spaces": ["PUBLIC"]}}'
+```
+
+**Roles**:
+- **Viewer**: Read-only access to allowed resources
+- **Editor**: Read + write access to allowed resources
+- **Admin**: Full access + configuration changes
+
+**Permissions**:
+RBAC enforces granular permissions for each tool:
+- `jira:read:issue`, `jira:create:issue`, `jira:update:issue`, `jira:delete:issue`
+- `confluence:read:page`, `confluence:create:page`, `confluence:update:page`, `confluence:delete:page`
+- `bitbucket:read:repo`, `bitbucket:write:repo`, `bitbucket:admin:repo`
+- `system:config`, `system:audit`
+
+**Entra ID Integration**:
+- Groups extracted from JWT tokens (`groups` claim)
+- Groups fetched from Microsoft Graph API for opaque tokens (requires `GroupMember.Read.All` permission)
+- Automatic group-to-role mapping
+- Highest privilege role selected when user is in multiple groups
+
+**Resource Restrictions**:
+- Restrict access to specific Jira projects
+- Restrict access to specific Confluence spaces
+- Restrict access to specific Bitbucket repositories
+- Wildcard (`*`) support for "all resources"
+
+**Examples**:
+
+1. **Simple Group-Based RBAC**:
+   ```bash
+   RBAC_ENABLED=true
+   RBAC_GROUP_ROLES="jira-viewers:viewer,jira-editors:editor"
+   RBAC_DEFAULT_ROLE=viewer
+   ```
+
+2. **Per-User Overrides**:
+   ```bash
+   RBAC_ENABLED=true
+   RBAC_GROUP_ROLES="jira-viewers:viewer"
+   RBAC_USER_ROLES='{"admin@company.com": ["admin"]}'
+   ```
+
+3. **Resource Restrictions**:
+   ```bash
+   RBAC_ENABLED=true
+   RBAC_RESOURCE_RESTRICTIONS='{"contractor@company.com": {"jira_projects": ["PROJ-123"], "confluence_spaces": ["PUBLIC"]}}'
+   ```
+
+**Behavior**:
+- RBAC checks occur before tool execution
+- Tools filtered from `tools/list` based on user permissions
+- Permission denials logged in audit logs
+- Backward compatible: Works alongside `READ_ONLY_MODE` and `ENABLED_TOOLS`
+- Performance optimized: Permission checks cached (<1ms)
+
+**Microsoft Graph API Permissions**:
+For opaque token group fetching, ensure your Entra ID app has:
+- `GroupMember.Read.All` (Application permission) - Required for fetching user groups
 - Separate limits for users, IPs, and individual tools
 - TTL-based sliding window (requests reset after window expires)
 

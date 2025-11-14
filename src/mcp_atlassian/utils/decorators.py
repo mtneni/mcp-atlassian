@@ -15,6 +15,12 @@ from mcp_atlassian.utils.audit import (
     DataClassification,
     get_audit_logger,
 )
+from mcp_atlassian.utils.rbac import (
+    Permission,
+    ResourceScope,
+    get_rbac_manager,
+    is_rbac_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +191,113 @@ def audit_tool_execution(func: F) -> F:
             raise
 
     return wrapper  # type: ignore
+
+
+def require_permission(permission: Permission, resource_type: str | None = None) -> Callable[[F], F]:
+    """
+    Decorator to check RBAC permissions before tool execution.
+
+    Args:
+        permission: Required permission for the tool
+        resource_type: Optional resource type (e.g., "jira_project", "confluence_space")
+
+    Returns:
+        Decorator function
+    """
+
+    def decorator(func: F) -> F:
+        @wraps(func)
+        async def wrapper(ctx: Context, *args: Any, **kwargs: Any) -> Any:
+            # Check if RBAC is enabled
+            if not is_rbac_enabled():
+                # RBAC disabled, allow (backward compatibility)
+                return await func(ctx, *args, **kwargs)
+
+            rbac_manager = get_rbac_manager()
+            if not rbac_manager:
+                return await func(ctx, *args, **kwargs)
+
+            # Extract user context from request state
+            user_id = None
+            user_tenant = None
+            groups = None
+
+            try:
+                from starlette.requests import Request
+
+                request: Request | None = getattr(ctx.request_context, "request", None)
+                if request and hasattr(request, "state"):
+                    # Try Entra ID user info first
+                    entra_id_info = getattr(request.state, "entra_id_user_info", None)
+                    if entra_id_info:
+                        user_id = getattr(entra_id_info, "email", None) or getattr(
+                            entra_id_info, "preferred_username", None
+                        )
+                        user_tenant = getattr(entra_id_info, "tenant_id", None)
+                        groups = getattr(entra_id_info, "groups", None)
+
+                    # Fallback to Atlassian email
+                    if not user_id:
+                        user_id = getattr(request.state, "user_atlassian_email", None)
+
+            except Exception as e:
+                logger.debug(f"Failed to extract user context for RBAC: {e}")
+
+            if not user_id:
+                # No user context, deny (security by default)
+                audit_logger = get_audit_logger()
+                if audit_logger:
+                    audit_logger.log(
+                        action=AuditAction.TOOL_DENIED,
+                        result=AuditResult.DENIED,
+                        tool_name=func.__name__,
+                        error_message="Permission denied: User context not available",
+                    )
+                raise ValueError("Permission denied: User context not available")
+
+            # Get user roles
+            user_role = rbac_manager.get_user_roles(
+                user_id=user_id, groups=groups, tenant_id=user_tenant
+            )
+
+            # Extract resource identifier from arguments
+            resource_identifier = None
+            if args and isinstance(args[0], str):
+                resource_identifier = args[0]
+
+            # Create resource scope if needed
+            resource_scope = None
+            if resource_identifier and resource_type:
+                resource_scope = ResourceScope(
+                    type=resource_type,
+                    identifier=resource_identifier,
+                    action=permission.value.split(":")[1],
+                )
+
+            # Check permission
+            has_perm = rbac_manager.has_permission(user_role, permission, resource_scope)
+
+            if not has_perm:
+                # Audit log denial
+                audit_logger = get_audit_logger()
+                if audit_logger:
+                    audit_logger.log(
+                        action=AuditAction.TOOL_DENIED,
+                        result=AuditResult.DENIED,
+                        user_id=user_id,
+                        user_tenant=user_tenant,
+                        tool_name=func.__name__,
+                        error_message=f"Permission denied: {permission.value} required",
+                    )
+
+                raise ValueError(f"Permission denied: {permission.value} required")
+
+            # Execute tool
+            return await func(ctx, *args, **kwargs)
+
+        return wrapper  # type: ignore
+
+    return decorator
 
 
 def check_write_access(func: F) -> F:

@@ -40,6 +40,7 @@ from mcp_atlassian.utils.io import is_read_only_mode
 from mcp_atlassian.utils.logging import mask_sensitive
 from mcp_atlassian.utils.prometheus_metrics import get_metrics, initialize_metrics
 from mcp_atlassian.utils.rate_limit import get_rate_limiter
+from mcp_atlassian.utils.rbac import get_rbac_manager, is_rbac_enabled
 from mcp_atlassian.utils.tools import get_enabled_tools, should_include_tool
 
 from .bitbucket import bitbucket_mcp
@@ -99,6 +100,16 @@ def _initialize_security_features() -> None:
             logger.info(f"  → PII masking: {'enabled' if audit_logger.mask_pii else 'disabled'}")
         else:
             logger.info("✓ Audit logging disabled")
+        
+        # Initialize RBAC
+        rbac_manager = get_rbac_manager()
+        if rbac_manager and rbac_manager.is_enabled():
+            logger.info("✓ RBAC enabled and initialized")
+            logger.info(f"  → Default role: {rbac_manager.config.default_role.value}")
+            logger.info(f"  → Group mappings: {len(rbac_manager.config.group_role_mappings)}")
+            logger.info(f"  → User overrides: {len(rbac_manager.config.user_role_overrides)}")
+        else:
+            logger.info("✓ RBAC disabled")
     except Exception as e:
         logger.error(f"Error initializing security features: {e}", exc_info=True)
 
@@ -459,6 +470,48 @@ class AtlassianMCP(FastMCP[MainAppContext]):
 
             if not service_configured_and_available:
                 continue
+
+            # RBAC filtering (if enabled and user context available)
+            rbac_manager = get_rbac_manager()
+            if rbac_manager and rbac_manager.is_enabled():
+                try:
+                    # Try to get user context from request
+                    req_context = self._mcp_server.request_context
+                    request = getattr(req_context, "request", None) if req_context else None
+                    
+                    if request and hasattr(request, "state"):
+                        # Extract user info
+                        user_id = None
+                        groups = None
+                        tenant_id = None
+                        
+                        # Try Entra ID user info first
+                        entra_id_info = getattr(request.state, "entra_id_user_info", None)
+                        if entra_id_info:
+                            user_id = getattr(entra_id_info, "email", None) or getattr(
+                                entra_id_info, "preferred_username", None
+                            )
+                            tenant_id = getattr(entra_id_info, "tenant_id", None)
+                            groups = getattr(entra_id_info, "groups", None)
+                        
+                        # Fallback to Atlassian email
+                        if not user_id:
+                            user_id = getattr(request.state, "user_atlassian_email", None)
+                        
+                        # If we have user context, check RBAC permissions
+                        if user_id:
+                            user_role = rbac_manager.get_user_roles(
+                                user_id=user_id, groups=groups, tenant_id=tenant_id
+                            )
+                            allowed, _ = rbac_manager.check_tool_access(user_role, registered_name)
+                            if not allowed:
+                                logger.debug(
+                                    f"RBAC: Excluding tool '{registered_name}' for user '{user_id}'"
+                                )
+                                continue
+                except Exception as e:
+                    # If RBAC check fails, log and continue (fail open for backward compatibility)
+                    logger.debug(f"RBAC check failed for tool '{registered_name}': {e}")
 
             filtered_tools.append(tool_obj.to_mcp_tool(name=registered_name))
 

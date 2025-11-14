@@ -155,6 +155,7 @@ class EntraIdUserInfo:
     tenant_id: Optional[str] = None
     object_id: Optional[str] = None
     app_id: Optional[str] = None
+    groups: Optional[list[str]] = None  # Group object IDs or display names
 
     @classmethod
     def from_token_payload(cls, payload: Dict[str, Any]) -> "EntraIdUserInfo":
@@ -166,6 +167,11 @@ class EntraIdUserInfo:
         Returns:
             EntraIdUserInfo with extracted user data
         """
+        # Extract groups from token (may be in 'groups' claim or 'wids' claim)
+        groups = payload.get("groups") or payload.get("wids") or []
+        if isinstance(groups, str):
+            groups = [groups]
+        
         return cls(
             email=payload.get("email"),
             preferred_username=payload.get("preferred_username"),
@@ -173,6 +179,7 @@ class EntraIdUserInfo:
             tenant_id=payload.get("tid"),  # tenant ID
             object_id=payload.get("oid"),  # object ID
             app_id=payload.get("appid"),  # application ID
+            groups=groups if groups else None,
         )
 
     @classmethod
@@ -192,6 +199,7 @@ class EntraIdUserInfo:
             tenant_id=None,  # Not directly available from /me endpoint
             object_id=graph_data.get("id"),  # Object ID in Graph API
             app_id=None,  # Not available from Graph API /me endpoint
+            groups=None,  # Groups need to be fetched separately via /memberOf endpoint
         )
 
 
@@ -630,6 +638,68 @@ def is_entra_id_enabled() -> bool:
     """
     validator = get_entra_id_validator()
     return validator is not None and validator.is_entra_id_enabled()
+
+
+async def fetch_user_groups_from_graph(
+    token: str, user_object_id: Optional[str] = None
+) -> tuple[bool, Optional[str], Optional[list[str]]]:
+    """Fetch user groups from Microsoft Graph API.
+
+    Args:
+        token: Entra ID access token
+        user_object_id: Optional user object ID (if not provided, uses /me endpoint)
+
+    Returns:
+        Tuple of (success, error_message, groups_list)
+    """
+    # Import here to avoid circular dependency
+    from mcp_atlassian.utils.rbac import is_rbac_enabled
+    
+    validator = get_entra_id_validator()
+    if not validator:
+        return False, "Entra ID validator not available", None
+
+    try:
+        # Use /me/memberOf endpoint or /users/{id}/memberOf
+        if user_object_id:
+            graph_url = f"https://graph.microsoft.com/v1.0/users/{user_object_id}/memberOf"
+        else:
+            graph_url = "https://graph.microsoft.com/v1.0/me/memberOf"
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+        validator.rate_limiter.record_call()
+        response = await validator.http_client.get(graph_url, headers=headers)
+
+        if response.status_code == 401:
+            return False, "Invalid or expired access token", None
+        if response.status_code == 403:
+            return False, "Access token lacks required permissions (GroupMember.Read.All)", None
+
+        response.raise_for_status()
+        graph_data = response.json()
+
+        # Extract group object IDs or display names
+        groups = []
+        for item in graph_data.get("value", []):
+            # Filter for security groups (not distribution groups)
+            if item.get("@odata.type") == "#microsoft.graph.group":
+                # Prefer object ID (more reliable) but also support display name
+                group_id = item.get("id")
+                group_name = item.get("displayName")
+                if group_id:
+                    groups.append(group_id)
+                elif group_name:
+                    groups.append(group_name)
+
+        return True, None, groups if groups else None
+
+    except Exception as e:
+        logger.error(f"Failed to fetch user groups from Graph API: {e}")
+        return False, str(e), None
 
 
 async def validate_entra_id_token(

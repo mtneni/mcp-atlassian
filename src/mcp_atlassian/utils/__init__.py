@@ -20,6 +20,14 @@ from .rate_limit import (
     get_rate_limiter,
     is_rate_limiting_enabled,
 )
+from .rbac import (
+    Permission,
+    ResourceScope,
+    Role,
+    UserRole,
+    get_rbac_manager,
+    is_rbac_enabled,
+)
 from .ssl import SSLIgnoreAdapter, configure_ssl_verification
 from .urls import is_atlassian_cloud_url
 
@@ -39,4 +47,11 @@ __all__ = [
     "RateLimiter",
     "get_rate_limiter",
     "is_rate_limiting_enabled",
+    # RBAC
+    "Role",
+    "Permission",
+    "ResourceScope",
+    "UserRole",
+    "get_rbac_manager",
+    "is_rbac_enabled",
 ]
