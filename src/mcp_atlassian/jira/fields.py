@@ -446,14 +446,30 @@ class FieldsMixin(JiraClient, EpicOperationsProto, UsersOperationsProto):
 
             # Format based on field type
             if field_type == "user":
-                # Handle user fields - need accountId for cloud or name for server
+                # Handle user fields - need accountId for cloud or name for server/DC
                 if isinstance(value, str):
-                    try:
-                        account_id = self._get_account_id(value)
-                        return {"accountId": account_id}
-                    except Exception as e:
-                        logger.warning(f"Could not resolve user '{value}': {str(e)}")
-                        return value
+                    # Check if _get_account_id is available (from UsersMixin)
+                    if hasattr(self, "_get_account_id"):
+                        try:
+                            account_id = self._get_account_id(value)
+                            # Check if this is cloud or server/DC
+                            if hasattr(self, "config") and self.config.is_cloud:
+                                return {"accountId": account_id}
+                            else:
+                                # Server/DC uses name format
+                                return {"name": account_id}
+                        except Exception as e:
+                            logger.warning(f"Could not resolve user '{value}': {str(e)}")
+                            # Fallback: return name format for server/DC compatibility
+                            if hasattr(self, "config") and not self.config.is_cloud:
+                                return {"name": value}
+                            return value
+                    else:
+                        # _get_account_id not available - use name format (server/DC fallback)
+                        logger.debug(
+                            f"_get_account_id not available, using name format for user field: {value}"
+                        )
+                        return {"name": value}
                 else:
                     return value
 
