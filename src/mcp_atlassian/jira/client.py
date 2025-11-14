@@ -72,17 +72,33 @@ class JiraClient:
                 verify_ssl=self.config.ssl_verify,
             )
         elif self.config.auth_type == "pat":
-            logger.debug(
-                f"Initializing Jira client with Token (PAT) auth. "
-                f"URL: {self.config.url}, "
-                f"Token (masked): {mask_sensitive(str(self.config.personal_token))}"
-            )
-            self.jira = Jira(
-                url=self.config.url,
-                token=self.config.personal_token,
-                cloud=self.config.is_cloud,
-                verify_ssl=self.config.ssl_verify,
-            )
+            if self.config.is_cloud and self.config.username:
+                # Cloud PAT tokens require Basic Auth (email + token)
+                logger.debug(
+                    f"Initializing Jira client with Cloud PAT (Basic Auth). "
+                    f"URL: {self.config.url}, Username: {self.config.username}, "
+                    f"Token (masked): {mask_sensitive(str(self.config.personal_token))}"
+                )
+                self.jira = Jira(
+                    url=self.config.url,
+                    username=self.config.username,
+                    password=self.config.personal_token,
+                    cloud=True,
+                    verify_ssl=self.config.ssl_verify,
+                )
+            else:
+                # Server/DC PAT tokens use Bearer auth
+                logger.debug(
+                    f"Initializing Jira client with Token (PAT) auth. "
+                    f"URL: {self.config.url}, "
+                    f"Token (masked): {mask_sensitive(str(self.config.personal_token))}"
+                )
+                self.jira = Jira(
+                    url=self.config.url,
+                    token=self.config.personal_token,
+                    cloud=False,
+                    verify_ssl=self.config.ssl_verify,
+                )
         else:  # basic auth
             logger.debug(
                 f"Initializing Jira client with Basic auth. "

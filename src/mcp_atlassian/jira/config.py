@@ -97,10 +97,14 @@ class JiraConfig:
             # OAuth is available - could be full config or minimal config for user-provided tokens
             auth_type = "oauth"
         elif is_cloud:
-            if username and api_token:
+            # Cloud supports: Basic Auth (username + api_token) or PAT (username + personal_token)
+            if username and personal_token:
+                # Cloud PAT tokens require Basic Auth (email + token)
+                auth_type = "pat"
+            elif username and api_token:
                 auth_type = "basic"
             else:
-                error_msg = "Cloud authentication requires JIRA_USERNAME and JIRA_API_TOKEN, or OAuth configuration (set ATLASSIAN_OAUTH_ENABLE=true for user-provided tokens)"
+                error_msg = "Cloud authentication requires (JIRA_USERNAME and JIRA_API_TOKEN) or (JIRA_USERNAME and JIRA_PERSONAL_TOKEN), or OAuth configuration (set ATLASSIAN_OAUTH_ENABLE=true for user-provided tokens)"
                 raise ValueError(error_msg)
         else:  # Server/Data Center
             if personal_token:
@@ -183,6 +187,10 @@ class JiraConfig:
             logger.warning("Incomplete OAuth configuration detected")
             return False
         elif self.auth_type == "pat":
+            # For Cloud PAT, username is required (Basic Auth with email + token)
+            if self.is_cloud:
+                return bool(self.personal_token and self.username)
+            # For Server/DC PAT, only token is needed
             return bool(self.personal_token)
         elif self.auth_type == "basic":
             return bool(self.username and self.api_token)

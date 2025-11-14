@@ -25,3 +25,10 @@ Please report security vulnerabilities to [security contact].
    - Console output can be logged, screen-captured, or viewed by others with access to your environment
    - If client secrets are exposed, regenerate them immediately in your Atlassian developer console
    - Consider using environment variables or secure credential storage instead of direct console output
+
+5. **Entra ID Authentication**
+   - Entra ID tokens authenticate users to the MCP server only
+   - Server-side PAT tokens are used for Atlassian service authentication
+   - Never expose Entra ID tokens in logs or error messages
+   - Use secure token storage and transmission (HTTPS)
+   - Rotate PAT tokens regularly even when using Entra ID SSO

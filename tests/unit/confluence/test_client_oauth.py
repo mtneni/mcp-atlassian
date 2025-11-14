@@ -416,6 +416,6 @@ class TestConfluenceClientOAuth:
             # ConfluenceConfig.from_env should raise ValueError if no auth can be determined
             with pytest.raises(
                 ValueError,
-                match="Cloud authentication requires CONFLUENCE_USERNAME and CONFLUENCE_API_TOKEN, or OAuth configuration",
+                match="Cloud authentication requires.*CONFLUENCE_USERNAME.*CONFLUENCE_API_TOKEN.*or.*CONFLUENCE_PERSONAL_TOKEN.*or OAuth configuration",
             ):
                 ConfluenceClient()  # This will call ConfluenceConfig.from_env()
