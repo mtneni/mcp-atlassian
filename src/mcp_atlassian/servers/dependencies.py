@@ -18,6 +18,7 @@ from mcp_atlassian.confluence import ConfluenceConfig, ConfluenceFetcher
 from mcp_atlassian.jira import JiraConfig, JiraFetcher
 from mcp_atlassian.servers.context import MainAppContext
 from mcp_atlassian.utils.entra_id import is_entra_id_enabled
+from mcp_atlassian.utils.environment import get_available_services
 from mcp_atlassian.utils.oauth import OAuthConfig
 
 if TYPE_CHECKING:
@@ -209,9 +210,25 @@ async def get_jira_fetcher(ctx: Context) -> JiraFetcher:
             hasattr(request.state, "entra_id_user_info")
             and request.state.entra_id_user_info is not None
         )
+        
+        # When Entra ID is enabled, any 'oauth' auth_type without cloud_id indicates Entra ID token (not Atlassian OAuth)
+        # Entra ID tokens are Bearer tokens that authenticate to the MCP server, not Atlassian services
+        user_auth_type_check = getattr(request.state, "user_atlassian_auth_type", None)
+        has_cloud_id = hasattr(request.state, "user_atlassian_cloud_id") and getattr(request.state, "user_atlassian_cloud_id", None) is not None
+        
+        is_entra_id_auth = (
+            is_entra_id_enabled() 
+            and (entra_id_used or (user_auth_type_check == "oauth" and not has_cloud_id))
+        )
+        
+        logger.debug(
+            f"get_jira_fetcher: Entra ID check - enabled={is_entra_id_enabled()}, "
+            f"entra_id_used={entra_id_used}, user_auth_type={user_auth_type_check}, "
+            f"has_cloud_id={has_cloud_id}, is_entra_id_auth={is_entra_id_auth}"
+        )
 
         # When Entra ID is enabled and used, always use global server-side PAT configuration
-        if is_entra_id_enabled() and entra_id_used:
+        if is_entra_id_auth:
             logger.debug(
                 "get_jira_fetcher: Entra ID authentication detected, using global server-side PAT configuration"
             )
@@ -221,6 +238,27 @@ async def get_jira_fetcher(ctx: Context) -> JiraFetcher:
                 if isinstance(lifespan_ctx_dict_entra, dict)
                 else None
             )
+            
+            # Fallback: Load config directly if lifespan context is not available
+            if not app_lifespan_ctx_entra or not app_lifespan_ctx_entra.full_jira_config:
+                logger.warning(
+                    "Jira global configuration not available from lifespan context for Entra ID request. "
+                    "Attempting to load config directly from environment."
+                )
+                try:
+                    services = get_available_services()
+                    if services.get("jira"):
+                        jira_config = JiraConfig.from_env()
+                        if jira_config.is_auth_configured():
+                            logger.info("Fallback: Loaded Jira config directly from environment for Entra ID request")
+                            logger.debug(
+                                f"get_jira_fetcher: Using global JiraFetcher from direct env load for Entra ID. "
+                                f"Config auth_type: {jira_config.auth_type}"
+                            )
+                            return JiraFetcher(config=jira_config)
+                except Exception as e:
+                    logger.error(f"Failed to load Jira config as fallback for Entra ID: {e}", exc_info=True)
+            
             if app_lifespan_ctx_entra and app_lifespan_ctx_entra.full_jira_config:
                 logger.debug(
                     "get_jira_fetcher: Using global JiraFetcher for Entra ID authenticated request"
@@ -295,6 +333,42 @@ async def get_jira_fetcher(ctx: Context) -> JiraFetcher:
                 if isinstance(lifespan_ctx_dict, dict)
                 else None
             )
+            
+            # Fallback: Load config directly if lifespan context is not available
+            if not app_lifespan_ctx or not app_lifespan_ctx.full_jira_config:
+                logger.warning(
+                    "Jira global configuration not available from lifespan context. "
+                    "Attempting to load config directly from environment."
+                )
+                try:
+                    services = get_available_services()
+                    if services.get("jira"):
+                        jira_config = JiraConfig.from_env()
+                        if jira_config.is_auth_configured():
+                            app_lifespan_ctx = MainAppContext(
+                                full_jira_config=jira_config,
+                                full_confluence_config=None,
+                                full_bitbucket_config=None,
+                                read_only=False,
+                                enabled_tools=None,
+                            )
+                            logger.info("Fallback: Loaded Jira config directly from environment")
+                        else:
+                            raise ValueError(
+                                "Jira global configuration (URL, SSL) is not available from lifespan context "
+                                "and could not be loaded from environment."
+                            )
+                    else:
+                        raise ValueError(
+                            "Jira global configuration (URL, SSL) is not available from lifespan context "
+                            "and Jira is not configured in environment."
+                        )
+                except Exception as e:
+                    logger.error(f"Failed to load Jira config as fallback: {e}", exc_info=True)
+                    raise ValueError(
+                        "Jira global configuration (URL, SSL) is not available from lifespan context."
+                    ) from e
+            
             if not app_lifespan_ctx or not app_lifespan_ctx.full_jira_config:
                 raise ValueError(
                     "Jira global configuration (URL, SSL) is not available from lifespan context."
@@ -340,6 +414,27 @@ async def get_jira_fetcher(ctx: Context) -> JiraFetcher:
         if isinstance(lifespan_ctx_dict_global, dict)
         else None
     )
+    
+    # Fallback: Load config directly if lifespan context is not available
+    if not app_lifespan_ctx_global or not app_lifespan_ctx_global.full_jira_config:
+        logger.warning(
+            "Jira global configuration not available from lifespan context. "
+            "Attempting to load config directly from environment."
+        )
+        try:
+            services = get_available_services()
+            if services.get("jira"):
+                jira_config = JiraConfig.from_env()
+                if jira_config.is_auth_configured():
+                    logger.info("Fallback: Loaded Jira config directly from environment")
+                    logger.debug(
+                        f"get_jira_fetcher: Using global JiraFetcher from direct env load. "
+                        f"Config auth_type: {jira_config.auth_type}"
+                    )
+                    return JiraFetcher(config=jira_config)
+        except Exception as e:
+            logger.error(f"Failed to load Jira config as fallback: {e}", exc_info=True)
+    
     if app_lifespan_ctx_global and app_lifespan_ctx_global.full_jira_config:
         logger.debug(
             "get_jira_fetcher: Using global JiraFetcher from lifespan_context. "
@@ -387,9 +482,25 @@ async def get_confluence_fetcher(ctx: Context) -> ConfluenceFetcher:
             hasattr(request.state, "entra_id_user_info")
             and request.state.entra_id_user_info is not None
         )
+        
+        # When Entra ID is enabled, any 'oauth' auth_type without cloud_id indicates Entra ID token (not Atlassian OAuth)
+        # Entra ID tokens are Bearer tokens that authenticate to the MCP server, not Atlassian services
+        user_auth_type_check = getattr(request.state, "user_atlassian_auth_type", None)
+        has_cloud_id = hasattr(request.state, "user_atlassian_cloud_id") and getattr(request.state, "user_atlassian_cloud_id", None) is not None
+        
+        is_entra_id_auth = (
+            is_entra_id_enabled() 
+            and (entra_id_used or (user_auth_type_check == "oauth" and not has_cloud_id))
+        )
+        
+        logger.debug(
+            f"get_confluence_fetcher: Entra ID check - enabled={is_entra_id_enabled()}, "
+            f"entra_id_used={entra_id_used}, user_auth_type={user_auth_type_check}, "
+            f"has_cloud_id={has_cloud_id}, is_entra_id_auth={is_entra_id_auth}"
+        )
 
         # When Entra ID is enabled and used, always use global server-side PAT configuration
-        if is_entra_id_enabled() and entra_id_used:
+        if is_entra_id_auth:
             logger.debug(
                 "get_confluence_fetcher: Entra ID authentication detected, using global server-side PAT configuration"
             )
@@ -399,6 +510,27 @@ async def get_confluence_fetcher(ctx: Context) -> ConfluenceFetcher:
                 if isinstance(lifespan_ctx_dict_entra, dict)
                 else None
             )
+            
+            # Fallback: Load config directly if lifespan context is not available
+            if not app_lifespan_ctx_entra or not app_lifespan_ctx_entra.full_confluence_config:
+                logger.warning(
+                    "Confluence global configuration not available from lifespan context for Entra ID request. "
+                    "Attempting to load config directly from environment."
+                )
+                try:
+                    services = get_available_services()
+                    if services.get("confluence"):
+                        confluence_config = ConfluenceConfig.from_env()
+                        if confluence_config.is_auth_configured():
+                            logger.info("Fallback: Loaded Confluence config directly from environment for Entra ID request")
+                            logger.debug(
+                                f"get_confluence_fetcher: Using global ConfluenceFetcher from direct env load for Entra ID. "
+                                f"Config auth_type: {confluence_config.auth_type}"
+                            )
+                            return ConfluenceFetcher(config=confluence_config)
+                except Exception as e:
+                    logger.error(f"Failed to load Confluence config as fallback for Entra ID: {e}", exc_info=True)
+            
             if app_lifespan_ctx_entra and app_lifespan_ctx_entra.full_confluence_config:
                 logger.debug(
                     "get_confluence_fetcher: Using global ConfluenceFetcher for Entra ID authenticated request"
@@ -493,6 +625,42 @@ async def get_confluence_fetcher(ctx: Context) -> ConfluenceFetcher:
                 if isinstance(lifespan_ctx_dict, dict)
                 else None
             )
+            
+            # Fallback: Load config directly if lifespan context is not available
+            if not app_lifespan_ctx or not app_lifespan_ctx.full_confluence_config:
+                logger.warning(
+                    "Confluence global configuration not available from lifespan context. "
+                    "Attempting to load config directly from environment."
+                )
+                try:
+                    services = get_available_services()
+                    if services.get("confluence"):
+                        confluence_config = ConfluenceConfig.from_env()
+                        if confluence_config.is_auth_configured():
+                            app_lifespan_ctx = MainAppContext(
+                                full_jira_config=None,
+                                full_confluence_config=confluence_config,
+                                full_bitbucket_config=None,
+                                read_only=False,
+                                enabled_tools=None,
+                            )
+                            logger.info("Fallback: Loaded Confluence config directly from environment")
+                        else:
+                            raise ValueError(
+                                "Confluence global configuration (URL, SSL) is not available from lifespan context "
+                                "and could not be loaded from environment."
+                            )
+                    else:
+                        raise ValueError(
+                            "Confluence global configuration (URL, SSL) is not available from lifespan context "
+                            "and Confluence is not configured in environment."
+                        )
+                except Exception as e:
+                    logger.error(f"Failed to load Confluence config as fallback: {e}", exc_info=True)
+                    raise ValueError(
+                        "Confluence global configuration (URL, SSL) is not available from lifespan context."
+                    ) from e
+            
             if not app_lifespan_ctx or not app_lifespan_ctx.full_confluence_config:
                 raise ValueError(
                     "Confluence global configuration (URL, SSL) is not available from lifespan context."
@@ -555,6 +723,27 @@ async def get_confluence_fetcher(ctx: Context) -> ConfluenceFetcher:
         if isinstance(lifespan_ctx_dict_global, dict)
         else None
     )
+    
+    # Fallback: Load config directly if lifespan context is not available
+    if not app_lifespan_ctx_global or not app_lifespan_ctx_global.full_confluence_config:
+        logger.warning(
+            "Confluence global configuration not available from lifespan context. "
+            "Attempting to load config directly from environment."
+        )
+        try:
+            services = get_available_services()
+            if services.get("confluence"):
+                confluence_config = ConfluenceConfig.from_env()
+                if confluence_config.is_auth_configured():
+                    logger.info("Fallback: Loaded Confluence config directly from environment")
+                    logger.debug(
+                        f"get_confluence_fetcher: Using global ConfluenceFetcher from direct env load. "
+                        f"Config auth_type: {confluence_config.auth_type}"
+                    )
+                    return ConfluenceFetcher(config=confluence_config)
+        except Exception as e:
+            logger.error(f"Failed to load Confluence config as fallback: {e}", exc_info=True)
+    
     if app_lifespan_ctx_global and app_lifespan_ctx_global.full_confluence_config:
         logger.debug(
             "get_confluence_fetcher: Using global ConfluenceFetcher from lifespan_context. "

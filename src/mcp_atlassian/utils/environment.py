@@ -48,6 +48,7 @@ def get_available_services(
                 "with provided access token"
             )
         elif is_cloud:  # Cloud non-OAuth
+            # Cloud supports both API Token (username + api_token) and PAT (username + personal_token)
             if all(
                 [
                     os.getenv("CONFLUENCE_USERNAME"),
@@ -56,6 +57,14 @@ def get_available_services(
             ):
                 confluence_is_setup = True
                 logger.info("Using Confluence Cloud Basic Authentication (API Token)")
+            elif all(
+                [
+                    os.getenv("CONFLUENCE_USERNAME"),
+                    os.getenv("CONFLUENCE_PERSONAL_TOKEN"),
+                ]
+            ):
+                confluence_is_setup = True
+                logger.info("Using Confluence Cloud PAT Authentication (Personal Token)")
         else:  # Server/Data Center non-OAuth
             if os.getenv("CONFLUENCE_PERSONAL_TOKEN") or (
                 os.getenv("CONFLUENCE_USERNAME") and os.getenv("CONFLUENCE_API_TOKEN")
@@ -108,6 +117,7 @@ def get_available_services(
                 "with provided access token"
             )
         elif is_cloud:  # Cloud non-OAuth
+            # Cloud supports both API Token (username + api_token) and PAT (username + personal_token)
             if all(
                 [
                     os.getenv("JIRA_USERNAME"),
@@ -116,6 +126,14 @@ def get_available_services(
             ):
                 jira_is_setup = True
                 logger.info("Using Jira Cloud Basic Authentication (API Token)")
+            elif all(
+                [
+                    os.getenv("JIRA_USERNAME"),
+                    os.getenv("JIRA_PERSONAL_TOKEN"),
+                ]
+            ):
+                jira_is_setup = True
+                logger.info("Using Jira Cloud PAT Authentication (Personal Token)")
         else:  # Server/Data Center non-OAuth
             if os.getenv("JIRA_PERSONAL_TOKEN") or (
                 os.getenv("JIRA_USERNAME") and os.getenv("JIRA_API_TOKEN")

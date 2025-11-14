@@ -71,7 +71,10 @@ async def metrics_endpoint(request: Request) -> Response:
 @asynccontextmanager
 async def main_lifespan(app: FastMCP[MainAppContext]) -> AsyncIterator[dict]:
     logger.info("Main Atlassian MCP server lifespan starting...")
+    logger.info("=" * 70)
+    logger.info("LIFESPAN: Starting configuration loading...")
     services = get_available_services()
+    logger.info(f"LIFESPAN: Available services: {services}")
     read_only = is_read_only_mode()
     enabled_tools = get_enabled_tools()
 
@@ -87,6 +90,7 @@ async def main_lifespan(app: FastMCP[MainAppContext]) -> AsyncIterator[dict]:
                 logger.info(
                     "Jira configuration loaded and authentication is configured."
                 )
+                logger.info(f"LIFESPAN: Jira config loaded - auth_type={jira_config.auth_type}, is_cloud={jira_config.is_cloud}")
             else:
                 logger.warning(
                     "Jira URL found, but authentication is not fully configured. "
@@ -103,6 +107,7 @@ async def main_lifespan(app: FastMCP[MainAppContext]) -> AsyncIterator[dict]:
                 logger.info(
                     "Confluence configuration loaded and authentication is configured."
                 )
+                logger.info(f"LIFESPAN: Confluence config loaded - auth_type={confluence_config.auth_type}, is_cloud={confluence_config.is_cloud}")
             else:
                 logger.warning(
                     "Confluence URL found, but authentication is not fully configured. "
@@ -138,6 +143,14 @@ async def main_lifespan(app: FastMCP[MainAppContext]) -> AsyncIterator[dict]:
                 raise ValueError(
                     "Entra ID enabled but Jira is not configured with PAT authentication"
                 )
+            # For Cloud PAT tokens, username (email) is required
+            if loaded_jira_config.is_cloud and not loaded_jira_config.username:
+                logger.error(
+                    "Entra ID authentication requires JIRA_USERNAME (email) for Cloud PAT tokens"
+                )
+                raise ValueError(
+                    "Entra ID enabled but JIRA_USERNAME is missing for Cloud PAT authentication"
+                )
             try:
                 # Validate PAT token by creating a test fetcher
                 test_jira_fetcher = JiraFetcher(config=loaded_jira_config)
@@ -155,6 +168,14 @@ async def main_lifespan(app: FastMCP[MainAppContext]) -> AsyncIterator[dict]:
                 )
                 raise ValueError(
                     "Entra ID enabled but Confluence is not configured with PAT authentication"
+                )
+            # For Cloud PAT tokens, username (email) is required
+            if loaded_confluence_config.is_cloud and not loaded_confluence_config.username:
+                logger.error(
+                    "Entra ID authentication requires CONFLUENCE_USERNAME (email) for Cloud PAT tokens"
+                )
+                raise ValueError(
+                    "Entra ID enabled but CONFLUENCE_USERNAME is missing for Cloud PAT authentication"
                 )
             try:
                 # Validate PAT token by creating a test fetcher
@@ -178,11 +199,16 @@ async def main_lifespan(app: FastMCP[MainAppContext]) -> AsyncIterator[dict]:
         read_only=read_only,
         enabled_tools=enabled_tools,
     )
+    logger.info(f"LIFESPAN: Created app_context - jira_config={'SET' if loaded_jira_config else 'None'}, confluence_config={'SET' if loaded_confluence_config else 'None'}")
     logger.info(f"Read-only mode: {'ENABLED' if read_only else 'DISABLED'}")
     logger.info(f"Enabled tools filter: {enabled_tools or 'All tools enabled'}")
 
     try:
+        logger.info("LIFESPAN: About to yield context")
+        logger.info(f"LIFESPAN: app_context.full_jira_config={'SET' if app_context.full_jira_config else 'None'}")
+        logger.info(f"LIFESPAN: app_context.full_confluence_config={'SET' if app_context.full_confluence_config else 'None'}")
         yield {"app_lifespan_context": app_context}
+        logger.info("LIFESPAN: Context yielded successfully")
     except Exception as e:
         logger.error(f"Error during lifespan: {e}", exc_info=True)
         raise
@@ -209,18 +235,59 @@ class AtlassianMCP(FastMCP[MainAppContext]):
         # Filter tools based on enabled_tools, read_only mode, and service configuration
         # from the lifespan context.
         req_context = self._mcp_server.request_context
-        if req_context is None or req_context.lifespan_context is None:
+        lifespan_ctx_dict = req_context.lifespan_context if req_context else None
+        
+        # Check if lifespan context is missing or empty
+        if (
+            req_context is None
+            or lifespan_ctx_dict is None
+            or (isinstance(lifespan_ctx_dict, dict) and len(lifespan_ctx_dict) == 0)
+        ):
             logger.warning(
-                "Lifespan context not available during _main_mcp_list_tools call."
+                "Lifespan context not available or empty during _main_mcp_list_tools call. "
+                "This may indicate the lifespan function didn't execute. "
+                "Will attempt to load configs directly."
             )
-            return []
-
-        lifespan_ctx_dict = req_context.lifespan_context
-        app_lifespan_state: MainAppContext | None = (
-            lifespan_ctx_dict.get("app_lifespan_context")
-            if isinstance(lifespan_ctx_dict, dict)
-            else None
-        )
+            # Fallback: Try to load configs directly if lifespan didn't execute
+            try:
+                services = get_available_services()
+                loaded_jira_config = None
+                loaded_confluence_config = None
+                if services.get("jira"):
+                    jira_config = JiraConfig.from_env()
+                    if jira_config.is_auth_configured():
+                        loaded_jira_config = jira_config
+                        logger.info("Fallback: Loaded Jira config successfully")
+                if services.get("confluence"):
+                    confluence_config = ConfluenceConfig.from_env()
+                    if confluence_config.is_auth_configured():
+                        loaded_confluence_config = confluence_config
+                        logger.info("Fallback: Loaded Confluence config successfully")
+                
+                # Create a temporary context for tool filtering
+                app_lifespan_state = MainAppContext(
+                    full_jira_config=loaded_jira_config,
+                    full_confluence_config=loaded_confluence_config,
+                    full_bitbucket_config=None,
+                    read_only=is_read_only_mode(),
+                    enabled_tools=get_enabled_tools(),
+                )
+                logger.info(
+                    f"Loaded configs directly as fallback - jira={'SET' if loaded_jira_config else 'None'}, "
+                    f"confluence={'SET' if loaded_confluence_config else 'None'}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to load configs as fallback: {e}", exc_info=True)
+                return []
+        else:
+            # Lifespan context exists and is not empty, extract it normally
+            logger.debug(f"_main_mcp_list_tools: lifespan_ctx_dict type: {type(lifespan_ctx_dict)}, keys: {list(lifespan_ctx_dict.keys()) if isinstance(lifespan_ctx_dict, dict) else 'N/A'}")
+            app_lifespan_state: MainAppContext | None = (
+                lifespan_ctx_dict.get("app_lifespan_context")
+                if isinstance(lifespan_ctx_dict, dict)
+                else None
+            )
+        logger.debug(f"_main_mcp_list_tools: app_lifespan_state: {'SET' if app_lifespan_state else 'None'}, jira_config: {'SET' if app_lifespan_state and app_lifespan_state.full_jira_config else 'None'}, confluence_config: {'SET' if app_lifespan_state and app_lifespan_state.full_confluence_config else 'None'}")
         read_only = (
             getattr(app_lifespan_state, "read_only", False)
             if app_lifespan_state
@@ -403,7 +470,7 @@ class UserTokenMiddleware:
         )
 
         if scope["type"] != "http":
-            # For non-HTTP requests, pass through directly
+            # For non-HTTP requests (lifespan, websocket, etc.), pass through directly
             await self.app(scope, receive, send)
             return
 
@@ -416,7 +483,7 @@ class UserTokenMiddleware:
 
         # Start metrics tracking for HTTP request
         metrics_collector = get_metrics()
-        request_path = scope.get("path", "")
+        request_path = scope.get("path", "").rstrip("/")
         method = scope.get("method", "")
         metrics_context = None
 
@@ -436,8 +503,26 @@ class UserTokenMiddleware:
             return
 
         mcp_path = settings.streamable_http_path.rstrip("/")
-        request_path = scope.get("path", "").rstrip("/")
-        method = scope.get("method", "")
+        
+        # Initialize cached receive function (will be used if needed for POST requests)
+        cached_messages: list[dict] = []
+        message_index = 0
+        cached_receive_func: Callable | None = None
+
+        async def cached_receive() -> dict:
+            nonlocal cached_messages, message_index
+
+            # If we already have this message cached, return it
+            if message_index < len(cached_messages):
+                message = cached_messages[message_index]
+                message_index += 1
+                return message
+
+            # Otherwise, receive and cache the message
+            message = await receive()
+            cached_messages.append(message)
+            message_index += 1
+            return message
 
         logger.debug(
             f"UserTokenMiddleware.__call__: Comparing request_path='{request_path}' "
@@ -447,6 +532,9 @@ class UserTokenMiddleware:
         if request_path == mcp_path and method == "POST":
             # Parse headers from scope (headers are byte tuples per ASGI spec)
             headers = dict(scope.get("headers", []))
+            
+            # Set cached_receive_func so we can use it for body parsing
+            cached_receive_func = cached_receive
 
             # Check if Entra ID authentication is enabled
             entra_id_enabled = is_entra_id_enabled()
@@ -457,26 +545,10 @@ class UserTokenMiddleware:
             if entra_id_enabled:
                 # Parse request body to determine the JSON-RPC method
                 try:
-                    # Create a temporary cached_receive to peek at the request body
-                    temp_cached_messages = []
-                    temp_message_index = 0
-
-                    async def temp_cached_receive() -> dict:
-                        nonlocal temp_cached_messages, temp_message_index
-                        if temp_message_index < len(temp_cached_messages):
-                            message = temp_cached_messages[temp_message_index]
-                            temp_message_index += 1
-                            return message
-
-                        message = await receive()
-                        temp_cached_messages.append(message)
-                        temp_message_index += 1
-                        return message
-
                     # Read the request body to extract JSON-RPC method
                     body_parts = []
                     while True:
-                        message = await temp_cached_receive()
+                        message = await cached_receive_func()
                         if message["type"] == "http.request":
                             body_parts.append(message.get("body", b""))
                             if not message.get("more_body", False):
@@ -491,11 +563,16 @@ class UserTokenMiddleware:
 
                     logger.debug(f"JSON-RPC method: {jsonrpc_method}")
 
+                    # Reset message index so the body can be read again by metrics and downstream app
+                    message_index = 0
+
                 except (json.JSONDecodeError, UnicodeDecodeError, KeyError) as e:
                     logger.warning(
                         f"Failed to parse JSON-RPC request body for Entra ID method detection: {e}"
                     )
                     jsonrpc_method = None
+                    # Reset message index even on error
+                    message_index = 0
 
             # Handle Entra ID authentication if enabled and this is a tools/call request
             if entra_id_enabled and jsonrpc_method == "tools/call":
@@ -513,7 +590,18 @@ class UserTokenMiddleware:
                     )
                     return
 
-                entra_id_token = auth_header_str.split(" ", 1)[1].strip()
+                # Extract token from "Bearer <token>" format
+                parts = auth_header_str.split(" ", 1)
+                if len(parts) < 2:
+                    logger.warning(
+                        "Entra ID authentication required but Bearer token format is invalid"
+                    )
+                    await self._send_error_response(
+                        send, "Unauthorized: Invalid Bearer token format", 401
+                    )
+                    return
+                
+                entra_id_token = parts[1].strip()
                 if not entra_id_token:
                     logger.warning(
                         "Entra ID authentication required but Bearer token is empty"
@@ -522,6 +610,15 @@ class UserTokenMiddleware:
                         send, "Unauthorized: Empty Bearer token", 401
                     )
                     return
+
+                # Log token prefix for debugging (first 20 chars + last 10 chars, masked)
+                token_preview = (
+                    f"{entra_id_token[:20]}...{entra_id_token[-10:]}" 
+                    if len(entra_id_token) > 30 
+                    else entra_id_token[:30]
+                )
+                logger.debug(f"Extracted Entra ID token (preview): {token_preview}")
+                logger.debug(f"Token length: {len(entra_id_token)}, parts count: {len(entra_id_token.split('.'))}")
 
                 # Validate Entra ID token
                 is_valid, error_msg, user_info = validate_entra_id_token(entra_id_token)
@@ -633,31 +730,13 @@ class UserTokenMiddleware:
 
             # Track service-specific user activity for business intelligence
             activity_type = None
-            cached_messages = []
-            message_index = 0
-
-            # Create a wrapper to cache the request body without consuming it
-            async def cached_receive() -> dict:
-                nonlocal cached_messages, message_index
-
-                # If we already have this message cached, return it
-                if message_index < len(cached_messages):
-                    message = cached_messages[message_index]
-                    message_index += 1
-                    return message
-
-                # Otherwise, receive and cache the message
-                message = await receive()
-                cached_messages.append(message)
-                message_index += 1
-                return message
 
             if metrics_collector:
                 try:
                     # Read the request body to extract activity type
                     body_parts = []
                     while True:
-                        message = await cached_receive()
+                        message = await cached_receive_func()
                         if message["type"] == "http.request":
                             body_parts.append(message.get("body", b""))
                             if not message.get("more_body", False):
@@ -896,7 +975,8 @@ class UserTokenMiddleware:
                 raise
 
         # Continue with the request using the modified scope and cached receive
-        receive_func = cached_receive if "cached_receive" in locals() else receive
+        # Use cached_receive_func if we've set it (for POST requests to MCP endpoint), otherwise use original receive
+        receive_func = cached_receive_func if cached_receive_func is not None else receive
         await self.app(scope_copy, receive_func, safe_send)
 
         # End metrics tracking
