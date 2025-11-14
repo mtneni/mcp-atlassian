@@ -49,6 +49,7 @@ def audit_tool_execution(func: F) -> F:
         user_agent = None
         session_id = None
         request_id = None
+        request_metadata = {}
 
         try:
             from starlette.requests import Request
@@ -72,11 +73,28 @@ def audit_tool_execution(func: F) -> F:
                 # Extract user agent
                 user_agent = request.headers.get("user-agent")
 
-                # Extract session ID
-                session_id = getattr(request.state, "mcp_session_id", None)
+                # Extract session ID (prefer Copilot session ID if available)
+                session_id = getattr(request.state, "copilot_session_id", None) or getattr(
+                    request.state, "mcp_session_id", None
+                )
 
-                # Extract request ID if available
-                request_id = getattr(request.state, "request_id", None)
+                # Extract request ID (prefer Copilot request ID if available)
+                request_id = getattr(request.state, "copilot_client_request_id", None) or getattr(
+                    request.state, "request_id", None
+                )
+
+                # Extract client headers for telemetry and agent tracking
+                copilot_agent_id = getattr(request.state, "copilot_agent_id", None)
+                copilot_correlation_id = getattr(request.state, "copilot_correlation_id", None)
+                
+                if copilot_agent_id:
+                    request_metadata["copilot_agent_id"] = copilot_agent_id
+                if copilot_correlation_id:
+                    request_metadata["copilot_correlation_id"] = copilot_correlation_id
+                if copilot_client_request_id := getattr(request.state, "copilot_client_request_id", None):
+                    request_metadata["copilot_client_request_id"] = copilot_client_request_id
+                if copilot_session_id := getattr(request.state, "copilot_session_id", None):
+                    request_metadata["copilot_session_id"] = copilot_session_id
 
         except Exception as e:
             logger.debug(f"Failed to extract audit context: {e}")
@@ -118,6 +136,12 @@ def audit_tool_execution(func: F) -> F:
 
             # Log successful execution
             if audit_logger:
+                # Merge request metadata with existing metadata
+                metadata = {
+                    "args_count": len(args),
+                    "kwargs_keys": list(kwargs.keys()),
+                    **request_metadata,
+                }
                 audit_logger.log(
                     action=AuditAction.TOOL_EXECUTED,
                     result=result,
@@ -133,7 +157,7 @@ def audit_tool_execution(func: F) -> F:
                     tool_name=tool_name,
                     duration_ms=duration_ms,
                     data_classification=data_classification,
-                    metadata={"args_count": len(args), "kwargs_keys": list(kwargs.keys())},
+                    metadata=metadata,
                 )
 
             return result_data
@@ -160,6 +184,7 @@ def audit_tool_execution(func: F) -> F:
                     duration_ms=duration_ms,
                     error_message=error_message,
                     data_classification=data_classification,
+                    metadata=request_metadata,
                 )
 
             raise
@@ -186,6 +211,7 @@ def audit_tool_execution(func: F) -> F:
                     duration_ms=duration_ms,
                     error_message=error_message,
                     data_classification=data_classification,
+                    metadata=request_metadata,
                 )
 
             raise
