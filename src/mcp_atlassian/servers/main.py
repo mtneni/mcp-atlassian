@@ -664,6 +664,59 @@ class UserTokenMiddleware:
             # Parse headers from scope (headers are byte tuples per ASGI spec)
             headers = dict(scope.get("headers", []))
             
+            # Extract Copilot Studio headers early for use in rate limiting and audit logging
+            copilot_client_request_id_header = headers.get(b"x-ms-client-request-id")
+            copilot_client_request_id = (
+                copilot_client_request_id_header.decode("latin-1")
+                if copilot_client_request_id_header
+                else None
+            )
+            if copilot_client_request_id:
+                scope_copy["state"]["copilot_client_request_id"] = copilot_client_request_id
+                # Override our generated request_id with Copilot's for consistency
+                scope_copy["state"]["request_id"] = copilot_client_request_id
+                request_id = copilot_client_request_id
+                logger.debug(
+                    f"UserTokenMiddleware: Copilot client request ID found: {copilot_client_request_id}"
+                )
+
+            copilot_agent_id_header = headers.get(b"x-ms-copilot-agent-id")
+            copilot_agent_id = (
+                copilot_agent_id_header.decode("latin-1")
+                if copilot_agent_id_header
+                else None
+            )
+            if copilot_agent_id:
+                scope_copy["state"]["copilot_agent_id"] = copilot_agent_id
+                logger.debug(
+                    f"UserTokenMiddleware: Copilot agent ID found: {copilot_agent_id}"
+                )
+
+            copilot_session_id_header = headers.get(b"x-ms-copilot-session-id")
+            copilot_session_id = (
+                copilot_session_id_header.decode("latin-1")
+                if copilot_session_id_header
+                else None
+            )
+            if copilot_session_id:
+                scope_copy["state"]["copilot_session_id"] = copilot_session_id
+                scope_copy["state"]["session_id"] = copilot_session_id
+                logger.debug(
+                    f"UserTokenMiddleware: Copilot session ID found: {copilot_session_id}"
+                )
+
+            copilot_correlation_id_header = headers.get(b"x-ms-correlation-id")
+            copilot_correlation_id = (
+                copilot_correlation_id_header.decode("latin-1")
+                if copilot_correlation_id_header
+                else None
+            )
+            if copilot_correlation_id:
+                scope_copy["state"]["copilot_correlation_id"] = copilot_correlation_id
+                logger.debug(
+                    f"UserTokenMiddleware: Copilot correlation ID found: {copilot_correlation_id}"
+                )
+            
             # Extract user identifier for rate limiting
             username_header = headers.get(b"x-atlassian-username")
             username = username_header.decode("latin-1") if username_header else None
@@ -718,6 +771,17 @@ class UserTokenMiddleware:
                         user_agent = (
                             user_agent_header.decode("latin-1") if user_agent_header else None
                         )
+                        # Build metadata with Copilot headers if available
+                        metadata = {"rate_limit_retry_after": retry_after}
+                        if copilot_agent_id:
+                            metadata["copilot_agent_id"] = copilot_agent_id
+                        if copilot_correlation_id:
+                            metadata["copilot_correlation_id"] = copilot_correlation_id
+                        if copilot_client_request_id:
+                            metadata["copilot_client_request_id"] = copilot_client_request_id
+                        if copilot_session_id:
+                            metadata["copilot_session_id"] = copilot_session_id
+                        
                         audit_logger.log(
                             action=AuditAction.TOOL_DENIED,
                             result=AuditResult.DENIED,
@@ -727,7 +791,7 @@ class UserTokenMiddleware:
                             request_id=request_id,
                             tool_name=tool_name_for_rate_limit,
                             error_message=error_msg,
-                            metadata={"rate_limit_retry_after": retry_after},
+                            metadata=metadata,
                         )
                     
                     # Send 429 Too Many Requests response
@@ -1129,19 +1193,21 @@ class UserTokenMiddleware:
                     f"{list(service_headers.keys())}"
                 )
 
-            # Check for mcp-session-id header for debugging
-            mcp_session_id_header = headers.get(b"mcp-session-id")
-            mcp_session_id = (
-                mcp_session_id_header.decode("latin-1")
-                if mcp_session_id_header
-                else None
-            )
-            if mcp_session_id:
-                logger.debug(
-                    f"UserTokenMiddleware: MCP-Session-ID header found: "
-                    f"{mcp_session_id}"
+            # Check for mcp-session-id header for debugging (only if Copilot session ID not already set)
+            copilot_session_id_from_state = scope_copy["state"].get("copilot_session_id")
+            if not copilot_session_id_from_state:
+                mcp_session_id_header = headers.get(b"mcp-session-id")
+                mcp_session_id = (
+                    mcp_session_id_header.decode("latin-1")
+                    if mcp_session_id_header
+                    else None
                 )
-                scope_copy["state"]["mcp_session_id"] = mcp_session_id
+                if mcp_session_id:
+                    logger.debug(
+                        f"UserTokenMiddleware: MCP-Session-ID header found: "
+                        f"{mcp_session_id}"
+                    )
+                    scope_copy["state"]["mcp_session_id"] = mcp_session_id
 
             if auth_header_str and auth_header_str.startswith("Bearer "):
                 token = auth_header_str.split(" ", 1)[1].strip()
