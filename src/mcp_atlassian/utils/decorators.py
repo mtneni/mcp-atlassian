@@ -1,4 +1,5 @@
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any, TypeVar
@@ -8,11 +9,182 @@ from fastmcp import Context
 from requests.exceptions import HTTPError
 
 from mcp_atlassian.exceptions import MCPAtlassianAuthenticationError
+from mcp_atlassian.utils.audit import (
+    AuditAction,
+    AuditResult,
+    DataClassification,
+    get_audit_logger,
+)
 
 logger = logging.getLogger(__name__)
 
 
 F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
+
+
+def audit_tool_execution(func: F) -> F:
+    """
+    Decorator to audit tool execution for compliance and security monitoring.
+
+    Logs tool execution with user context, resource information, and execution results.
+    Assumes the decorated function is async and has `ctx: Context` as its first argument.
+    """
+
+    @wraps(func)
+    async def wrapper(ctx: Context, *args: Any, **kwargs: Any) -> Any:
+        audit_logger = get_audit_logger()
+        tool_name = func.__name__
+        start_time = time.time()
+
+        # Extract user context from request state
+        user_id = None
+        user_tenant = None
+        user_ip = None
+        user_agent = None
+        session_id = None
+        request_id = None
+
+        try:
+            from starlette.requests import Request
+
+            request: Request | None = getattr(ctx.request_context, "request", None)
+            if request and hasattr(request, "state"):
+                user_id = getattr(request.state, "user_atlassian_email", None)
+                if not user_id:
+                    # Try Entra ID user info
+                    entra_id_info = getattr(request.state, "entra_id_user_info", None)
+                    if entra_id_info:
+                        user_id = getattr(entra_id_info, "email", None) or getattr(
+                            entra_id_info, "preferred_username", None
+                        )
+                        user_tenant = getattr(entra_id_info, "tenant_id", None)
+
+                # Extract IP address from request
+                if hasattr(request, "client") and request.client:
+                    user_ip = request.client.host
+
+                # Extract user agent
+                user_agent = request.headers.get("user-agent")
+
+                # Extract session ID
+                session_id = getattr(request.state, "mcp_session_id", None)
+
+                # Extract request ID if available
+                request_id = getattr(request.state, "request_id", None)
+
+        except Exception as e:
+            logger.debug(f"Failed to extract audit context: {e}")
+
+        # Determine resource type and ID from tool name and arguments
+        resource_type = None
+        resource_id = None
+        resource_url = None
+
+        # Try to extract resource information from arguments
+        if args:
+            first_arg = args[0]
+            if isinstance(first_arg, str):
+                # Common patterns: issue_key, page_id, project_key, etc.
+                if "issue" in tool_name.lower() or "jira" in tool_name.lower():
+                    resource_type = "jira_issue"
+                    resource_id = first_arg
+                elif "page" in tool_name.lower() or "confluence" in tool_name.lower():
+                    resource_type = "confluence_page"
+                    resource_id = first_arg
+                elif "project" in tool_name.lower():
+                    resource_type = "jira_project"
+                    resource_id = first_arg
+
+        # Determine data classification based on tool type
+        data_classification = DataClassification.INTERNAL
+        if "write" in func.__tags__ if hasattr(func, "__tags__") else False:
+            data_classification = DataClassification.CONFIDENTIAL
+
+        result = AuditResult.SUCCESS
+        error_message = None
+
+        try:
+            # Execute the tool
+            result_data = await func(ctx, *args, **kwargs)
+
+            # Calculate duration
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            # Log successful execution
+            if audit_logger:
+                audit_logger.log(
+                    action=AuditAction.TOOL_EXECUTED,
+                    result=result,
+                    user_id=user_id,
+                    user_tenant=user_tenant,
+                    user_ip=user_ip,
+                    user_agent=user_agent,
+                    session_id=session_id,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    resource_url=resource_url,
+                    request_id=request_id,
+                    tool_name=tool_name,
+                    duration_ms=duration_ms,
+                    data_classification=data_classification,
+                    metadata={"args_count": len(args), "kwargs_keys": list(kwargs.keys())},
+                )
+
+            return result_data
+
+        except ValueError as e:
+            # Read-only mode or permission denied
+            result = AuditResult.DENIED
+            error_message = str(e)
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            if audit_logger:
+                audit_logger.log(
+                    action=AuditAction.TOOL_DENIED,
+                    result=result,
+                    user_id=user_id,
+                    user_tenant=user_tenant,
+                    user_ip=user_ip,
+                    user_agent=user_agent,
+                    session_id=session_id,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    request_id=request_id,
+                    tool_name=tool_name,
+                    duration_ms=duration_ms,
+                    error_message=error_message,
+                    data_classification=data_classification,
+                )
+
+            raise
+
+        except Exception as e:
+            # Tool execution error
+            result = AuditResult.ERROR
+            error_message = str(e)
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            if audit_logger:
+                audit_logger.log(
+                    action=AuditAction.TOOL_ERROR,
+                    result=result,
+                    user_id=user_id,
+                    user_tenant=user_tenant,
+                    user_ip=user_ip,
+                    user_agent=user_agent,
+                    session_id=session_id,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    request_id=request_id,
+                    tool_name=tool_name,
+                    duration_ms=duration_ms,
+                    error_message=error_message,
+                    data_classification=data_classification,
+                )
+
+            raise
+
+    return wrapper  # type: ignore
 
 
 def check_write_access(func: F) -> F:

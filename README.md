@@ -985,6 +985,68 @@ Returns 400 error if missing when enabled.
 - Grafana dashboard provisioning via ConfigMaps
 - ServiceMonitor for Prometheus Operator
 
+### Audit Logging (Enterprise Compliance)
+
+**Structured Audit Logging** for compliance and security monitoring:
+- Comprehensive audit trail with structured JSON logs
+- Automatic logging of authentication events, tool execution, and data access
+- PII masking for privacy compliance (GDPR, HIPAA)
+- Multiple output formats (file, stdout)
+- Configurable retention policies
+
+**Configuration**:
+```bash
+# Enable audit logging
+AUDIT_LOG_ENABLED=true
+
+# Output to file
+AUDIT_LOG_FILE=/var/log/mcp-atlassian/audit.log
+
+# Output to stdout (for containerized deployments)
+AUDIT_LOG_STDOUT=true
+
+# Mask PII in logs (default: true)
+AUDIT_LOG_MASK_PII=true
+
+# Default retention period in days (default: 90)
+AUDIT_LOG_RETENTION_DAYS=90
+```
+
+**Audit Log Entry Format**:
+```json
+{
+  "timestamp": "2024-01-15T10:30:00.123456+00:00",
+  "user_id": "user@example.com",
+  "user_tenant": "tenant-id",
+  "user_ip": "10.0.0.1",
+  "user_agent": "MCP-Client/1.0",
+  "session_id": "abc123",
+  "action": "tool_executed",
+  "action_category": "tool_execution",
+  "result": "success",
+  "resource_type": "jira_issue",
+  "resource_id": "PROJ-123",
+  "request_id": "req-uuid",
+  "tool_name": "jira_get_issue",
+  "duration_ms": 150,
+  "data_classification": "internal",
+  "compliance_tags": [],
+  "retention_days": 90
+}
+```
+
+**Audited Events**:
+- Authentication success/failure
+- Tool execution (success, denied, error)
+- Data access and modification
+- Server lifecycle events (start/stop)
+- Session creation/termination
+
+**Compliance Features**:
+- GDPR compliance: PII masking, data access tracking
+- SOC 2: Comprehensive audit trail
+- HIPAA: Data classification and retention policies
+
 ## Tools
 
 ### Key Tools

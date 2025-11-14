@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any, Literal, Optional
@@ -23,6 +24,12 @@ from mcp_atlassian.confluence import ConfluenceFetcher
 from mcp_atlassian.confluence.config import ConfluenceConfig
 from mcp_atlassian.jira import JiraFetcher
 from mcp_atlassian.jira.config import JiraConfig
+from mcp_atlassian.utils.audit import (
+    AuditAction,
+    AuditResult,
+    get_audit_logger,
+    is_audit_logging_enabled,
+)
 from mcp_atlassian.utils.entra_id import (
     EntraIdConfig,
     is_entra_id_enabled,
@@ -70,6 +77,16 @@ async def metrics_endpoint(request: Request) -> Response:
 
 @asynccontextmanager
 async def main_lifespan(app: FastMCP[MainAppContext]) -> AsyncIterator[dict]:
+    """Lifespan context manager for the MCP server with audit logging."""
+    # Audit log server startup
+    audit_logger = get_audit_logger()
+    if audit_logger:
+        audit_logger.log(
+            action=AuditAction.SERVER_STARTED,
+            result=AuditResult.SUCCESS,
+            metadata={"pod_name": pod_name},
+        )
+    
     logger.info("Main Atlassian MCP server lifespan starting...")
     logger.info("=" * 70)
     logger.info("LIFESPAN: Starting configuration loading...")
@@ -226,6 +243,16 @@ async def main_lifespan(app: FastMCP[MainAppContext]) -> AsyncIterator[dict]:
         except Exception as e:
             logger.error(f"Error during cleanup: {e}", exc_info=True)
         logger.info("Main Atlassian MCP server lifespan shutdown complete.")
+        
+        # Audit log server shutdown
+        audit_logger = get_audit_logger()
+        if audit_logger:
+            audit_logger.log(
+                action=AuditAction.SERVER_STOPPED,
+                result=AuditResult.SUCCESS,
+                metadata={"pod_name": pod_name},
+            )
+            audit_logger.close()
 
 
 class AtlassianMCP(FastMCP[MainAppContext]):
@@ -481,6 +508,25 @@ class UserTokenMiddleware:
         if "state" not in scope_copy:
             scope_copy["state"] = {}
 
+        # Generate request ID for audit logging
+        request_id = str(uuid.uuid4())
+        scope_copy["state"]["request_id"] = request_id
+
+        # Extract client IP address from scope
+        client_ip = None
+        if "client" in scope and scope["client"]:
+            client_ip = scope["client"][0] if isinstance(scope["client"], tuple) else None
+        elif "headers" in scope:
+            headers = dict(scope.get("headers", []))
+            # Check for X-Forwarded-For or X-Real-IP headers
+            x_forwarded_for = headers.get(b"x-forwarded-for")
+            if x_forwarded_for:
+                client_ip = x_forwarded_for.decode("latin-1").split(",")[0].strip()
+            else:
+                x_real_ip = headers.get(b"x-real-ip")
+                if x_real_ip:
+                    client_ip = x_real_ip.decode("latin-1").strip()
+
         # Start metrics tracking for HTTP request
         metrics_collector = get_metrics()
         request_path = scope.get("path", "").rstrip("/")
@@ -621,6 +667,24 @@ class UserTokenMiddleware:
                 is_valid, error_msg, user_info = await validate_entra_id_token(entra_id_token)
                 if not is_valid:
                     logger.warning(f"Entra ID token validation failed: {error_msg}")
+                    
+                    # Audit log authentication failure
+                    audit_logger = get_audit_logger()
+                    if audit_logger:
+                        user_agent_header = headers.get(b"user-agent")
+                        user_agent = (
+                            user_agent_header.decode("latin-1") if user_agent_header else None
+                        )
+                        audit_logger.log(
+                            action=AuditAction.AUTHENTICATION_FAILURE,
+                            result=AuditResult.FAILURE,
+                            user_ip=client_ip,
+                            user_agent=user_agent,
+                            request_id=request_id,
+                            error_message=error_msg,
+                            metadata={"auth_method": "entra_id", "endpoint": request_path},
+                        )
+                    
                     await self._send_error_response(
                         send, f"Unauthorized: {error_msg}", 401
                     )
@@ -635,6 +699,31 @@ class UserTokenMiddleware:
                     logger.info(
                         f"Entra ID user authenticated: email={user_info.email}, tenant={user_info.tenant_id}, object_id={user_info.object_id}"
                     )
+                    
+                    # Audit log successful authentication
+                    audit_logger = get_audit_logger()
+                    if audit_logger:
+                        user_agent_header = headers.get(b"user-agent")
+                        user_agent = (
+                            user_agent_header.decode("latin-1") if user_agent_header else None
+                        )
+                        mcp_session_id_header = headers.get(b"mcp-session-id")
+                        session_id = (
+                            mcp_session_id_header.decode("latin-1")
+                            if mcp_session_id_header
+                            else None
+                        )
+                        audit_logger.log(
+                            action=AuditAction.AUTHENTICATION_SUCCESS,
+                            result=AuditResult.SUCCESS,
+                            user_id=user_info.email or user_info.preferred_username,
+                            user_tenant=user_info.tenant_id,
+                            user_ip=client_ip,
+                            user_agent=user_agent,
+                            session_id=session_id,
+                            request_id=request_id,
+                            metadata={"auth_method": "entra_id", "endpoint": request_path},
+                        )
 
                 logger.debug(
                     "Entra ID authentication successful for tools/call request"
@@ -876,6 +965,7 @@ class UserTokenMiddleware:
                     f"UserTokenMiddleware: MCP-Session-ID header found: "
                     f"{mcp_session_id}"
                 )
+                scope_copy["state"]["mcp_session_id"] = mcp_session_id
 
             if auth_header_str and auth_header_str.startswith("Bearer "):
                 token = auth_header_str.split(" ", 1)[1].strip()
