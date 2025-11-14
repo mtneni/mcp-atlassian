@@ -2,7 +2,7 @@
 
 import json
 import os
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -21,10 +21,13 @@ class TestEntraIdConfig:
 
     def test_from_env_enabled(self):
         """Test configuration loading when environment variables are set."""
-        with patch.dict(os.environ, {
-            "ENTRA_ID_EXPECTED_AUDIENCE": "test-audience",
-            "ENTRA_ID_EXPECTED_ISSUER": "https://login.microsoftonline.com/test-tenant/v2.0"
-        }):
+        with patch.dict(
+            os.environ,
+            {
+                "ENTRA_ID_EXPECTED_AUDIENCE": "test-audience",
+                "ENTRA_ID_EXPECTED_ISSUER": "https://login.microsoftonline.com/test-tenant/v2.0",
+            },
+        ):
             config = EntraIdConfig.from_env()
             assert config is not None
             assert config.expected_audience == "test-audience"
@@ -38,9 +41,7 @@ class TestEntraIdConfig:
 
     def test_from_env_partial(self):
         """Test configuration loading when only one environment variable is set."""
-        with patch.dict(os.environ, {
-            "ENTRA_ID_EXPECTED_AUDIENCE": "test-audience"
-        }):
+        with patch.dict(os.environ, {"ENTRA_ID_EXPECTED_AUDIENCE": "test-audience"}):
             config = EntraIdConfig.from_env()
             assert config is None
 
@@ -56,7 +57,7 @@ class TestEntraIdUserInfo:
             "upn": "user@example.com",
             "tid": "tenant-123",
             "oid": "object-456",
-            "appid": "app-789"
+            "appid": "app-789",
         }
 
         user_info = EntraIdUserInfo.from_token_payload(payload)
@@ -69,10 +70,7 @@ class TestEntraIdUserInfo:
 
     def test_from_token_payload_partial(self):
         """Test user info extraction from partial token payload."""
-        payload = {
-            "email": "user@example.com",
-            "tid": "tenant-123"
-        }
+        payload = {"email": "user@example.com", "tid": "tenant-123"}
 
         user_info = EntraIdUserInfo.from_token_payload(payload)
         assert user_info.email == "user@example.com"
@@ -88,52 +86,75 @@ class TestEntraIdValidator:
 
     def test_is_entra_id_enabled_true(self):
         """Test is_entra_id_enabled when config is present."""
-        config = EntraIdConfig("test-audience", "test-issuer")
+        config = EntraIdConfig(
+            expected_issuer="https://login.microsoftonline.com/test-tenant/v2.0",
+            expected_audience="test-audience",
+        )
         validator = EntraIdValidator(config)
         assert validator.is_entra_id_enabled() is True
 
     def test_is_entra_id_enabled_false(self):
         """Test is_entra_id_enabled when config is None."""
-        validator = EntraIdValidator(None)
-        assert validator.is_entra_id_enabled() is False
+        # This should raise ValueError now since we validate config in __init__
+        with pytest.raises(ValueError):
+            EntraIdValidator(None)
 
-    @patch("mcp_atlassian.utils.entra_id.requests.get")
-    def test_fetch_jwks_success(self, mock_get):
+    @pytest.mark.asyncio
+    async def test_fetch_jwks_success(self):
         """Test successful JWKS fetching."""
+        import httpx
+
         mock_response = Mock()
         mock_response.json.return_value = {"keys": [{"kid": "test-key"}]}
-        mock_get.return_value = mock_response
+        mock_response.status_code = 200
+        mock_response.raise_for_status = Mock()
 
-        config = EntraIdConfig("test-audience", "test-issuer")
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        config = EntraIdConfig(
+            expected_issuer="https://login.microsoftonline.com/test-tenant/v2.0",
+            expected_audience="test-audience",
+        )
         validator = EntraIdValidator(config)
+        validator.http_client = mock_client
 
-        jwks = validator._fetch_jwks()
+        jwks = await validator._fetch_jwks()
         assert jwks == {"keys": [{"kid": "test-key"}]}
-        mock_get.assert_called_once_with("https://login.microsoftonline.com/common/discovery/v2.0/keys", timeout=10)
 
-    @patch("mcp_atlassian.utils.entra_id.requests.get")
-    def test_fetch_jwks_failure(self, mock_get):
+    @pytest.mark.asyncio
+    async def test_fetch_jwks_failure(self):
         """Test JWKS fetching failure."""
-        from requests import RequestException
-        mock_get.side_effect = RequestException("Network error")
+        import httpx
 
-        config = EntraIdConfig("test-audience", "test-issuer")
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.RequestError("Network error"))
+
+        config = EntraIdConfig(
+            expected_issuer="https://login.microsoftonline.com/test-tenant/v2.0",
+            expected_audience="test-audience",
+        )
         validator = EntraIdValidator(config)
+        validator.http_client = mock_client
 
         with pytest.raises(ValueError, match="Failed to fetch JWKS"):
-            validator._fetch_jwks()
+            await validator._fetch_jwks()
 
-    def test_validate_token_invalid_config(self):
+    @pytest.mark.asyncio
+    async def test_validate_token_invalid_config(self):
         """Test token validation when config is None."""
-        validator = EntraIdValidator(None)
-        result = validator.validate_token("test-token")
-        assert result == (False, "Entra ID authentication not configured", None)
+        # This should raise ValueError now since we validate config in __init__
+        with pytest.raises(ValueError):
+            EntraIdValidator(None)
 
+    @pytest.mark.asyncio
     @patch("mcp_atlassian.utils.entra_id.jwt.decode")
     @patch.object(EntraIdValidator, "_get_signing_key")
     @patch.object(EntraIdValidator, "_fetch_jwks")
     @patch("mcp_atlassian.utils.entra_id.jwt.get_unverified_header")
-    def test_validate_token_success(self, mock_header, mock_jwks, mock_key, mock_decode):
+    async def test_validate_token_success(
+        self, mock_header, mock_jwks, mock_key, mock_decode
+    ):
         """Test successful token validation."""
         # Mock JWT header
         mock_header.return_value = {"kid": "test-kid"}
@@ -151,15 +172,18 @@ class TestEntraIdValidator:
             "exp": 2000000000,
             "iat": 1000000000,
             "aud": "test-audience",
-            "iss": "test-issuer"
+            "iss": "test-issuer",
         }
 
-        config = EntraIdConfig("test-audience", "test-issuer")
+        config = EntraIdConfig(
+            expected_issuer="https://login.microsoftonline.com/test-tenant/v2.0",
+            expected_audience="test-audience",
+        )
         validator = EntraIdValidator(config)
 
         # Use a JWT-formatted token (3 parts separated by dots) to ensure it's detected as JWT
         jwt_token = "header.payload.signature"
-        is_valid, error_msg, user_info = validator.validate_token(jwt_token)
+        is_valid, error_msg, user_info = await validator.validate_token(jwt_token)
 
         assert is_valid is True
         assert error_msg is None
@@ -173,10 +197,13 @@ class TestGlobalFunctions:
 
     def test_get_entra_id_validator_enabled(self):
         """Test get_entra_id_validator when enabled."""
-        with patch.dict(os.environ, {
-            "ENTRA_ID_EXPECTED_AUDIENCE": "test-audience",
-            "ENTRA_ID_EXPECTED_ISSUER": "test-issuer"
-        }):
+        with patch.dict(
+            os.environ,
+            {
+                "ENTRA_ID_EXPECTED_AUDIENCE": "test-audience",
+                "ENTRA_ID_EXPECTED_ISSUER": "https://login.microsoftonline.com/test-tenant/v2.0",
+            },
+        ):
             validator = get_entra_id_validator()
             assert validator is not None
             assert validator.is_entra_id_enabled() is True
@@ -190,10 +217,13 @@ class TestGlobalFunctions:
 
     def test_is_entra_id_enabled_true(self):
         """Test is_entra_id_enabled when enabled."""
-        with patch.dict(os.environ, {
-            "ENTRA_ID_EXPECTED_AUDIENCE": "test-audience",
-            "ENTRA_ID_EXPECTED_ISSUER": "test-issuer"
-        }):
+        with patch.dict(
+            os.environ,
+            {
+                "ENTRA_ID_EXPECTED_AUDIENCE": "test-audience",
+                "ENTRA_ID_EXPECTED_ISSUER": "https://login.microsoftonline.com/test-tenant/v2.0",
+            },
+        ):
             assert is_entra_id_enabled() is True
 
     def test_is_entra_id_enabled_false(self):
@@ -202,20 +232,28 @@ class TestGlobalFunctions:
             with patch.dict(os.environ, {}, clear=True):
                 assert is_entra_id_enabled() is False
 
-    def test_validate_entra_id_token_enabled(self):
+    @pytest.mark.asyncio
+    async def test_validate_entra_id_token_enabled(self):
         """Test validate_entra_id_token when enabled."""
-        with patch.dict(os.environ, {
-            "ENTRA_ID_EXPECTED_AUDIENCE": "test-audience",
-            "ENTRA_ID_EXPECTED_ISSUER": "test-issuer"
-        }):
-            with patch.object(EntraIdValidator, "validate_token", return_value=(True, None, Mock())) as mock_validate:
-                result = validate_entra_id_token("test-token")
+        with patch.dict(
+            os.environ,
+            {
+                "ENTRA_ID_EXPECTED_AUDIENCE": "test-audience",
+                "ENTRA_ID_EXPECTED_ISSUER": "https://login.microsoftonline.com/test-tenant/v2.0",
+            },
+        ):
+            with patch.object(
+                EntraIdValidator, "validate_token", new_callable=AsyncMock
+            ) as mock_validate:
+                mock_validate.return_value = (True, None, Mock())
+                result = await validate_entra_id_token("test-token")
                 mock_validate.assert_called_once_with("test-token")
                 assert result[0] is True
 
-    def test_validate_entra_id_token_disabled(self):
+    @pytest.mark.asyncio
+    async def test_validate_entra_id_token_disabled(self):
         """Test validate_entra_id_token when disabled."""
         with patch("mcp_atlassian.utils.entra_id._entra_id_validator", None):
             with patch.dict(os.environ, {}, clear=True):
-                result = validate_entra_id_token("test-token")
+                result = await validate_entra_id_token("test-token")
                 assert result == (False, "Entra ID authentication not configured", None)

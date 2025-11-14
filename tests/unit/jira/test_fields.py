@@ -364,52 +364,80 @@ class TestFieldsMixin:
     def test_format_field_value_user_field(
         self, fields_mixin: FieldsMixin, mock_fields
     ):
-        """Test format_field_value formats user fields correctly."""
+        """Test format_field_value formats user fields correctly for cloud."""
         # Set up the mocks
         fields_mixin.get_field_by_id = MagicMock(
             return_value=mock_fields[3]
         )  # The Assignee field
         fields_mixin._get_account_id = MagicMock(return_value="account123")
+        
+        # Mock config to indicate cloud
+        fields_mixin.config = MagicMock()
+        fields_mixin.config.is_cloud = True
 
         # Call the method with a user field and string value
         result = fields_mixin.format_field_value("assignee", "johndoe")
 
-        # Verify the result
+        # Verify the result - should use accountId format for cloud
         assert result == {"accountId": "account123"}
         fields_mixin._get_account_id.assert_called_once_with("johndoe")
 
-    # FIXME: The test covers impossible case.
-    #
-    # This test is failing because it assumes that the `_get_account_id`
-    # method is unavailable. As default, `format_field_value` will return
-    # `{"name": value}` for server/DC.
-    #
-    # However, in any case `JiraFetcher` always inherits from `UsersMixin`
-    # and will therefore have the `_get_account_id` method available.
-    #
-    # That is to say, the `format_field_value` method will never return in
-    # format `{"name": value}`.
-    #
-    # Further fixes are needed in the `FieldsMixin` class to support the case
-    # for server/DC.
-    #
-    # See also:
-    # https://github.com/SharkyND/mcp-atlassian/blob/651c271e8aa76b469e9c67535669d93267ad5da6/src/mcp_atlassian/jira/fields.py#L279-L297
+    def test_format_field_value_user_field_server_dc(
+        self, fields_mixin: FieldsMixin, mock_fields
+    ):
+        """Test format_field_value formats user fields for server/DC (name format)."""
+        # Set up the mocks
+        fields_mixin.get_field_by_id = MagicMock(
+            return_value=mock_fields[3]
+        )  # The Assignee field
+        
+        # Mock config to indicate server/DC (not cloud)
+        fields_mixin.config = MagicMock()
+        fields_mixin.config.is_cloud = False
+        
+        # Mock _get_account_id to return the username (server/DC behavior)
+        fields_mixin._get_account_id = MagicMock(return_value="johndoe")
 
-    # def test_format_field_value_user_field_no_account_id(
-    #     self, fields_mixin: FieldsMixin, mock_fields
-    # ):
-    #     """Test format_field_value handles user fields without _get_account_id."""
-    #     # Set up the mocks
-    #     fields_mixin.get_field_by_id = MagicMock(
-    #         return_value=mock_fields[3]
-    #     )  # The Assignee field
+        # Call the method with a user field and string value
+        result = fields_mixin.format_field_value("assignee", "johndoe")
 
-    #     # Call the method with a user field and string value
-    #     result = fields_mixin.format_field_value("assignee", "johndoe")
+        # Verify the result - should use name format for server/DC
+        assert result == {"name": "johndoe"}
+        fields_mixin._get_account_id.assert_called_once_with("johndoe")
 
-    #     # Verify the result - should use name for server/DC
-    #     assert result == {"name": "johndoe"}
+    def test_format_field_value_user_field_no_account_id(
+        self, fields_mixin: FieldsMixin, mock_fields
+    ):
+        """Test format_field_value handles user fields when _get_account_id is unavailable."""
+        # Set up the mocks
+        fields_mixin.get_field_by_id = MagicMock(
+            return_value=mock_fields[3]
+        )  # The Assignee field
+        
+        # Mock hasattr to return False for _get_account_id
+        original_hasattr = hasattr
+        def mock_hasattr(obj, name):
+            if name == "_get_account_id":
+                return False
+            return original_hasattr(obj, name)
+        
+        # Temporarily replace hasattr in the fields module
+        import mcp_atlassian.jira.fields as fields_module
+        original_hasattr_module = getattr(fields_module, 'hasattr', None)
+        fields_module.hasattr = mock_hasattr
+        
+        try:
+            # Call the method with a user field and string value
+            result = fields_mixin.format_field_value("assignee", "johndoe")
+
+            # Verify the result - should use name format as fallback
+            assert result == {"name": "johndoe"}
+        finally:
+            # Restore original hasattr
+            if original_hasattr_module:
+                fields_module.hasattr = original_hasattr_module
+            elif hasattr(fields_module, 'hasattr'):
+                delattr(fields_module, 'hasattr')
 
     def test_format_field_value_array_field(self, fields_mixin: FieldsMixin):
         """Test format_field_value formats array fields correctly."""
