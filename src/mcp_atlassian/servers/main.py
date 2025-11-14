@@ -23,6 +23,11 @@ from mcp_atlassian.confluence import ConfluenceFetcher
 from mcp_atlassian.confluence.config import ConfluenceConfig
 from mcp_atlassian.jira import JiraFetcher
 from mcp_atlassian.jira.config import JiraConfig
+from mcp_atlassian.utils.entra_id import (
+    EntraIdConfig,
+    is_entra_id_enabled,
+    validate_entra_id_token,
+)
 from mcp_atlassian.utils.environment import get_available_services
 from mcp_atlassian.utils.io import is_read_only_mode
 from mcp_atlassian.utils.logging import mask_sensitive
@@ -115,6 +120,56 @@ async def main_lifespan(app: FastMCP[MainAppContext]) -> AsyncIterator[dict]:
             )
         except Exception as e:
             logger.error(f"Failed to load Bitbucket configuration: {e}", exc_info=True)
+
+    # Validate Entra ID configuration if enabled
+    entra_id_config = EntraIdConfig.from_env()
+    if entra_id_config:
+        logger.info(
+            "Entra ID authentication is enabled. Validating server-side PAT configurations..."
+        )
+
+        # When Entra ID is enabled, we require PAT authentication for Jira and Confluence
+        if loaded_jira_config:
+            if loaded_jira_config.auth_type != "pat":
+                logger.error(
+                    "Entra ID authentication requires PAT tokens for Jira. "
+                    f"Current auth_type: {loaded_jira_config.auth_type}"
+                )
+                raise ValueError(
+                    "Entra ID enabled but Jira is not configured with PAT authentication"
+                )
+            try:
+                # Validate PAT token by creating a test fetcher
+                test_jira_fetcher = JiraFetcher(config=loaded_jira_config)
+                test_jira_fetcher.get_current_user_account_id()
+                logger.info("Jira PAT token validated successfully")
+            except Exception as e:
+                logger.error(f"Failed to validate Jira PAT token: {e}")
+                raise ValueError(f"Entra ID enabled but Jira PAT token is invalid: {e}")
+
+        if loaded_confluence_config:
+            if loaded_confluence_config.auth_type != "pat":
+                logger.error(
+                    "Entra ID authentication requires PAT tokens for Confluence. "
+                    f"Current auth_type: {loaded_confluence_config.auth_type}"
+                )
+                raise ValueError(
+                    "Entra ID enabled but Confluence is not configured with PAT authentication"
+                )
+            try:
+                # Validate PAT token by creating a test fetcher
+                test_confluence_fetcher = ConfluenceFetcher(
+                    config=loaded_confluence_config
+                )
+                test_confluence_fetcher.get_current_user_info()
+                logger.info("Confluence PAT token validated successfully")
+            except Exception as e:
+                logger.error(f"Failed to validate Confluence PAT token: {e}")
+                raise ValueError(
+                    f"Entra ID enabled but Confluence PAT token is invalid: {e}"
+                )
+
+        logger.info("Entra ID configuration validation completed successfully")
 
     app_context = MainAppContext(
         full_jira_config=loaded_jira_config,
@@ -392,6 +447,104 @@ class UserTokenMiddleware:
         if request_path == mcp_path and method == "POST":
             # Parse headers from scope (headers are byte tuples per ASGI spec)
             headers = dict(scope.get("headers", []))
+
+            # Check if Entra ID authentication is enabled
+            entra_id_enabled = is_entra_id_enabled()
+            logger.debug(f"Entra ID authentication enabled: {entra_id_enabled}")
+
+            # For Entra ID authentication, we need to check the JSON-RPC method
+            jsonrpc_method = None
+            if entra_id_enabled:
+                # Parse request body to determine the JSON-RPC method
+                try:
+                    # Create a temporary cached_receive to peek at the request body
+                    temp_cached_messages = []
+                    temp_message_index = 0
+
+                    async def temp_cached_receive() -> dict:
+                        nonlocal temp_cached_messages, temp_message_index
+                        if temp_message_index < len(temp_cached_messages):
+                            message = temp_cached_messages[temp_message_index]
+                            temp_message_index += 1
+                            return message
+
+                        message = await receive()
+                        temp_cached_messages.append(message)
+                        temp_message_index += 1
+                        return message
+
+                    # Read the request body to extract JSON-RPC method
+                    body_parts = []
+                    while True:
+                        message = await temp_cached_receive()
+                        if message["type"] == "http.request":
+                            body_parts.append(message.get("body", b""))
+                            if not message.get("more_body", False):
+                                break
+                        else:
+                            break
+
+                    full_body = b"".join(body_parts)
+                    if full_body:
+                        body_data = json.loads(full_body.decode("utf-8"))
+                        jsonrpc_method = body_data.get("method")
+
+                    logger.debug(f"JSON-RPC method: {jsonrpc_method}")
+
+                except (json.JSONDecodeError, UnicodeDecodeError, KeyError) as e:
+                    logger.warning(
+                        f"Failed to parse JSON-RPC request body for Entra ID method detection: {e}"
+                    )
+                    jsonrpc_method = None
+
+            # Handle Entra ID authentication if enabled and this is a tools/call request
+            if entra_id_enabled and jsonrpc_method == "tools/call":
+                auth_header = headers.get(b"authorization")
+                auth_header_str = auth_header.decode("latin-1") if auth_header else None
+
+                if not auth_header_str or not auth_header_str.startswith("Bearer "):
+                    logger.warning(
+                        "Entra ID authentication required for tools/call but no Bearer token provided"
+                    )
+                    await self._send_error_response(
+                        send,
+                        "Unauthorized: Bearer token required for tools/call when Entra ID authentication is enabled",
+                        401,
+                    )
+                    return
+
+                entra_id_token = auth_header_str.split(" ", 1)[1].strip()
+                if not entra_id_token:
+                    logger.warning(
+                        "Entra ID authentication required but Bearer token is empty"
+                    )
+                    await self._send_error_response(
+                        send, "Unauthorized: Empty Bearer token", 401
+                    )
+                    return
+
+                # Validate Entra ID token
+                is_valid, error_msg, user_info = validate_entra_id_token(entra_id_token)
+                if not is_valid:
+                    logger.warning(f"Entra ID token validation failed: {error_msg}")
+                    await self._send_error_response(
+                        send, f"Unauthorized: {error_msg}", 401
+                    )
+                    return
+
+                # Token is valid - store user information for observability
+                if user_info:
+                    scope_copy["state"]["entra_id_user_info"] = user_info
+                    scope_copy["state"]["user_atlassian_email"] = (
+                        user_info.email or user_info.preferred_username
+                    )
+                    logger.info(
+                        f"Entra ID user authenticated: email={user_info.email}, tenant={user_info.tenant_id}, object_id={user_info.object_id}"
+                    )
+
+                logger.debug(
+                    "Entra ID authentication successful for tools/call request"
+                )
 
             # Extract User-Agent header for tracking and make it lowercase
             user_agent_header = headers.get(b"user-agent")

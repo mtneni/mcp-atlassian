@@ -17,6 +17,7 @@ from mcp_atlassian.bitbucket import BitbucketConfig, BitbucketFetcher
 from mcp_atlassian.confluence import ConfluenceConfig, ConfluenceFetcher
 from mcp_atlassian.jira import JiraConfig, JiraFetcher
 from mcp_atlassian.servers.context import MainAppContext
+from mcp_atlassian.utils.entra_id import is_entra_id_enabled
 from mcp_atlassian.utils.oauth import OAuthConfig
 
 if TYPE_CHECKING:
@@ -202,6 +203,34 @@ async def get_jira_fetcher(ctx: Context) -> JiraFetcher:
         if hasattr(request.state, "jira_fetcher") and request.state.jira_fetcher:
             logger.debug("get_jira_fetcher: Returning JiraFetcher from request.state.")
             return request.state.jira_fetcher
+
+        # Check if Entra ID authentication was used for this request
+        entra_id_used = (
+            hasattr(request.state, "entra_id_user_info")
+            and request.state.entra_id_user_info is not None
+        )
+
+        # When Entra ID is enabled and used, always use global server-side PAT configuration
+        if is_entra_id_enabled() and entra_id_used:
+            logger.debug(
+                "get_jira_fetcher: Entra ID authentication detected, using global server-side PAT configuration"
+            )
+            lifespan_ctx_dict_entra = ctx.request_context.lifespan_context  # type: ignore
+            app_lifespan_ctx_entra: MainAppContext | None = (
+                lifespan_ctx_dict_entra.get("app_lifespan_context")
+                if isinstance(lifespan_ctx_dict_entra, dict)
+                else None
+            )
+            if app_lifespan_ctx_entra and app_lifespan_ctx_entra.full_jira_config:
+                logger.debug(
+                    "get_jira_fetcher: Using global JiraFetcher for Entra ID authenticated request"
+                )
+                return JiraFetcher(config=app_lifespan_ctx_entra.full_jira_config)
+            else:
+                raise ValueError(
+                    "Entra ID authentication enabled but no global Jira PAT configuration available"
+                )
+
         user_auth_type = getattr(request.state, "user_atlassian_auth_type", None)
         logger.debug(f"get_jira_fetcher: User auth type: {user_auth_type}")
 
@@ -352,6 +381,36 @@ async def get_confluence_fetcher(ctx: Context) -> ConfluenceFetcher:
                 "get_confluence_fetcher: Returning ConfluenceFetcher from request.state."
             )
             return request.state.confluence_fetcher
+
+        # Check if Entra ID authentication was used for this request
+        entra_id_used = (
+            hasattr(request.state, "entra_id_user_info")
+            and request.state.entra_id_user_info is not None
+        )
+
+        # When Entra ID is enabled and used, always use global server-side PAT configuration
+        if is_entra_id_enabled() and entra_id_used:
+            logger.debug(
+                "get_confluence_fetcher: Entra ID authentication detected, using global server-side PAT configuration"
+            )
+            lifespan_ctx_dict_entra = ctx.request_context.lifespan_context  # type: ignore
+            app_lifespan_ctx_entra: MainAppContext | None = (
+                lifespan_ctx_dict_entra.get("app_lifespan_context")
+                if isinstance(lifespan_ctx_dict_entra, dict)
+                else None
+            )
+            if app_lifespan_ctx_entra and app_lifespan_ctx_entra.full_confluence_config:
+                logger.debug(
+                    "get_confluence_fetcher: Using global ConfluenceFetcher for Entra ID authenticated request"
+                )
+                return ConfluenceFetcher(
+                    config=app_lifespan_ctx_entra.full_confluence_config
+                )
+            else:
+                raise ValueError(
+                    "Entra ID authentication enabled but no global Confluence PAT configuration available"
+                )
+
         user_auth_type = getattr(request.state, "user_atlassian_auth_type", None)
         logger.debug(f"get_confluence_fetcher: User auth type: {user_auth_type}")
 
