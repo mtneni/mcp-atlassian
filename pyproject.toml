@@ -27,6 +27,7 @@ dependencies = [
     "cachetools>=5.0.0",
     "types-cachetools>=5.5.0.20240820",
     "prometheus-client>=0.21.0",
+    "pyjwt>=2.10.1",
 ]
 [[project.authors]]
 name = "SharkyND"
@@ -123,6 +124,8 @@ explicit_package_bases = true
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-k 'not trio'"
+testpaths = ["tests"]
+norecursedirs = ["scripts", ".venv", "venv", "build", "dist"]
 markers = [
     "anyio: marks tests as anyio tests",
     "trio: marks tests as trio tests",
