@@ -42,7 +42,7 @@ uv run pytest                        # run full test suite
 **Architecture**:
 - **Mixins**: Functionality split into focused mixins extending base clients
 - **Models**: All data structures extend `ApiModel` base class
-- **Auth**: Supports API tokens, PAT tokens, and OAuth 2.0
+- **Auth**: Supports API tokens, PAT tokens, OAuth 2.0, and Entra ID (Azure AD) SSO
 
 ---
 

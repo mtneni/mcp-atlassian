@@ -45,7 +45,7 @@ https://github.com/user-attachments/assets/7fe9c488-ad0c-4876-9b54-120b666bb785
 
 ### 🔐 1. Authentication Setup
 
-MCP Atlassian supports four authentication methods:
+MCP Atlassian supports five authentication methods:
 
 #### A. API Token Authentication (Cloud) - **Recommended**
 
@@ -162,6 +162,87 @@ For **Bitbucket authentication**:
 > [!TIP]
 > **Multi-Cloud OAuth Support**: If you're building a multi-tenant application where users provide their own OAuth tokens, see the [Multi-Cloud OAuth Support](#multi-cloud-oauth-support) section for minimal configuration setup.
 
+#### E. Entra ID (Azure AD) Authentication - **Enterprise SSO**
+
+> [!NOTE]
+> Entra ID authentication provides enterprise single sign-on (SSO) capabilities, allowing users to authenticate to the MCP server using their Microsoft Entra ID (Azure AD) credentials. This is ideal for organizations using Microsoft identity services.
+
+**How It Works:**
+- Users authenticate to the MCP server using Entra ID Bearer tokens
+- The server validates tokens and uses server-side PAT credentials for Atlassian services
+- Supports both JWT tokens (ID tokens or access tokens) and opaque access tokens
+
+**Configuration:**
+
+1. **Set Entra ID environment variables:**
+   ```bash
+   # Required: Tenant issuer URL
+   export ENTRA_ID_EXPECTED_ISSUER="https://login.microsoftonline.com/{tenant-id}/v2.0"
+   
+   # Optional: For JWT token validation (tries multiple audiences if not set)
+   export ENTRA_ID_EXPECTED_AUDIENCE="your-app-id"
+   export ENTRA_ID_CLIENT_ID="your-client-id"
+   ```
+
+2. **Configure Atlassian services with PAT tokens:**
+   ```bash
+   # Jira Cloud PAT (required when Entra ID is enabled)
+   export JIRA_URL="https://your-company.atlassian.net"
+   export JIRA_USERNAME="service-account@company.com"
+   export JIRA_PERSONAL_TOKEN="your_jira_pat_token"
+   
+   # Confluence Cloud PAT (required when Entra ID is enabled)
+   export CONFLUENCE_URL="https://your-company.atlassian.net/wiki"
+   export CONFLUENCE_USERNAME="service-account@company.com"
+   export CONFLUENCE_PERSONAL_TOKEN="your_confluence_pat_token"
+   ```
+
+3. **Start the server:**
+   ```bash
+   uv run mcp-atlassian --transport streamable-http --port 8000
+   ```
+
+**Client Usage:**
+
+Clients authenticate by including an Entra ID Bearer token in the `Authorization` header:
+
+```json
+{
+  "mcpServers": {
+    "mcp-atlassian": {
+      "url": "http://localhost:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer <entra-id-token>"
+      },
+      "type": "http"
+    }
+  }
+}
+```
+
+**Token Types Supported:**
+- **JWT Tokens**: Validated via JWKS (JSON Web Key Set) with automatic audience fallback
+- **Opaque Access Tokens**: Validated via Microsoft Graph API `/me` endpoint
+
+**Key Features:**
+- ✅ Enterprise SSO integration
+- ✅ Supports both JWT and opaque tokens
+- ✅ Automatic token validation
+- ✅ User information extraction
+- ✅ Server-side PAT for Atlassian services (no user-specific Atlassian credentials needed)
+- ✅ Optional audience configuration (tries multiple audiences automatically)
+
+**Getting Tokens:**
+
+Users can obtain Entra ID tokens through:
+- Microsoft Graph Explorer: https://developer.microsoft.com/en-us/graph/graph-explorer
+- Azure CLI: `az account get-access-token`
+- OAuth 2.0 device code flow
+- Any standard Entra ID authentication flow
+
+> [!IMPORTANT]
+> When Entra ID authentication is enabled, the server requires PAT tokens for Jira and Confluence. The Entra ID token authenticates users to the MCP server, while PAT tokens authenticate the server to Atlassian services.
+
 ### 📦 2. Installation
 
 MCP Atlassian is distributed as a Docker image. This is the recommended way to run the server, especially for IDE integration. Ensure you have Docker installed.
@@ -201,12 +282,18 @@ There are three main approaches to configure the Docker container:
 > - `MCP_LOGGING_STDOUT`: Set to "true" to log to stdout instead of stderr
 > - `ENABLED_TOOLS`: Comma-separated list of tool names to enable (e.g., "confluence_search,jira_get_issue")
 >
-> **New: Header-Based Authentication Headers** (no environment variables needed):
+> **Entra ID Authentication** (Enterprise SSO):
+> - `ENTRA_ID_EXPECTED_ISSUER`: Required - Tenant issuer URL (e.g., `https://login.microsoftonline.com/{tenant-id}/v2.0`)
+> - `ENTRA_ID_EXPECTED_AUDIENCE`: Optional - App ID for JWT validation (tries multiple audiences if not set)
+> - `ENTRA_ID_CLIENT_ID`: Optional - Client ID for ID token validation
+>
+> **Header-Based Authentication Headers** (no environment variables needed):
 > - `X-Atlassian-Jira-Personal-Token`: Jira PAT/API token (passed as HTTP header)
 > - `X-Atlassian-Jira-Url`: Jira instance URL (passed as HTTP header)
 > - `X-Atlassian-Confluence-Personal-Token`: Confluence PAT/API token (passed as HTTP header)
 > - `X-Atlassian-Confluence-Url`: Confluence instance URL (passed as HTTP header)
 > - `X-Atlassian-Read-Only-Mode`: Per-request read-only mode (passed as HTTP header)
+> - `Authorization`: Bearer token for Entra ID authentication (when Entra ID is enabled)
 >
 > See the [.env.example](https://github.com/SharkyND/mcp-atlassian/blob/main/.env.example) file for all available options.
 
