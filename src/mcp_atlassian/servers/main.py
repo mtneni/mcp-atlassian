@@ -611,17 +611,14 @@ class UserTokenMiddleware:
                     )
                     return
 
-                # Log token prefix for debugging (first 20 chars + last 10 chars, masked)
-                token_preview = (
-                    f"{entra_id_token[:20]}...{entra_id_token[-10:]}" 
-                    if len(entra_id_token) > 30 
-                    else entra_id_token[:30]
+                # Log token metadata (not the token itself for security)
+                logger.debug(
+                    f"Entra ID token received: length={len(entra_id_token)}, "
+                    f"parts_count={len(entra_id_token.split('.'))}"
                 )
-                logger.debug(f"Extracted Entra ID token (preview): {token_preview}")
-                logger.debug(f"Token length: {len(entra_id_token)}, parts count: {len(entra_id_token.split('.'))}")
 
-                # Validate Entra ID token
-                is_valid, error_msg, user_info = validate_entra_id_token(entra_id_token)
+                # Validate Entra ID token (async)
+                is_valid, error_msg, user_info = await validate_entra_id_token(entra_id_token)
                 if not is_valid:
                     logger.warning(f"Entra ID token validation failed: {error_msg}")
                     await self._send_error_response(

@@ -8,18 +8,73 @@ Supports both:
 - Opaque access tokens: Validated via Microsoft Graph API
 """
 
+import hashlib
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlparse
 
 import jwt
-import requests
+import httpx
 from cachetools import TTLCache
 
 logger = logging.getLogger("mcp-atlassian.utils.entra_id")
+
+# Constants for configuration
+JWKS_CACHE_TTL_SECONDS = 86400  # 24 hours
+VALIDATION_CACHE_TTL_SECONDS = 300  # 5 minutes
+VALIDATION_CACHE_MAXSIZE = 1000  # Increased from 100
+HTTP_TIMEOUT_SECONDS = 10
+HTTP_MAX_TIMEOUT_SECONDS = 30
+GRAPH_API_RATE_LIMIT_PER_MINUTE = 60  # Conservative rate limit
+
+# Generic error messages to prevent information leakage
+ERROR_INVALID_TOKEN = "Invalid token"
+ERROR_TOKEN_EXPIRED = "Token has expired"
+ERROR_TOKEN_VALIDATION_FAILED = "Token validation failed"
+ERROR_INVALID_SIGNATURE = "Invalid token signature"
+ERROR_INVALID_ISSUER = "Invalid token issuer"
+ERROR_DECODE_FAILED = "Failed to decode token"
+
+
+def _hash_token(token: str) -> str:
+    """Hash a token for secure caching.
+
+    Args:
+        token: Token string to hash
+
+    Returns:
+        SHA-256 hash of the token (hex digest)
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _validate_issuer_url(issuer: str) -> Tuple[bool, Optional[str]]:
+    """Validate Entra ID issuer URL format.
+
+    Args:
+        issuer: Issuer URL to validate
+
+    Returns:
+        Tuple of (is_valid, tenant_id or None)
+    """
+    if not issuer or not isinstance(issuer, str):
+        return False, None
+
+    # Expected format: https://login.microsoftonline.com/{tenant-id}/v2.0
+    pattern = r"^https://login\.microsoftonline\.com/([^/]+)/v2\.0/?$"
+    match = re.match(pattern, issuer.rstrip("/"))
+    if not match:
+        return False, None
+
+    tenant_id = match.group(1)
+    # Accept any tenant ID (UUID, "common", "organizations", "consumers", or custom)
+    # Microsoft allows various formats, so we'll be lenient here
+    return True, tenant_id
 
 
 @dataclass
@@ -29,6 +84,11 @@ class EntraIdConfig:
     expected_issuer: str  # Required for JWT validation (to determine tenant JWKS endpoint)
     expected_audience: str | None = None  # Optional: used for JWT validation, but we try multiple audiences
     client_id: str | None = None  # Optional: for ID token validation (audience is client ID)
+    jwks_cache_ttl: int = JWKS_CACHE_TTL_SECONDS
+    validation_cache_ttl: int = VALIDATION_CACHE_TTL_SECONDS
+    validation_cache_maxsize: int = VALIDATION_CACHE_MAXSIZE
+    http_timeout: int = HTTP_TIMEOUT_SECONDS
+    graph_api_rate_limit: int = GRAPH_API_RATE_LIMIT_PER_MINUTE
 
     @classmethod
     def from_env(cls) -> Optional["EntraIdConfig"]:
@@ -47,7 +107,42 @@ class EntraIdConfig:
         if not issuer:
             return None
 
-        return cls(expected_issuer=issuer, expected_audience=audience, client_id=client_id)
+        # Validate issuer URL format
+        is_valid, tenant_id = _validate_issuer_url(issuer)
+        if not is_valid:
+            logger.warning(
+                f"Invalid Entra ID issuer URL format: {issuer}. "
+                "Expected format: https://login.microsoftonline.com/{{tenant-id}}/v2.0"
+            )
+            return None
+        
+        if not tenant_id:
+            logger.warning(f"Could not extract tenant ID from issuer URL: {issuer}")
+            return None
+
+        # Allow configuration overrides via environment variables
+        jwks_cache_ttl = int(os.getenv("ENTRA_ID_JWKS_CACHE_TTL", str(JWKS_CACHE_TTL_SECONDS)))
+        validation_cache_ttl = int(
+            os.getenv("ENTRA_ID_VALIDATION_CACHE_TTL", str(VALIDATION_CACHE_TTL_SECONDS))
+        )
+        validation_cache_maxsize = int(
+            os.getenv("ENTRA_ID_VALIDATION_CACHE_MAXSIZE", str(VALIDATION_CACHE_MAXSIZE))
+        )
+        http_timeout = int(os.getenv("ENTRA_ID_HTTP_TIMEOUT", str(HTTP_TIMEOUT_SECONDS)))
+        graph_api_rate_limit = int(
+            os.getenv("ENTRA_ID_GRAPH_API_RATE_LIMIT", str(GRAPH_API_RATE_LIMIT_PER_MINUTE))
+        )
+
+        return cls(
+            expected_issuer=issuer,
+            expected_audience=audience,
+            client_id=client_id,
+            jwks_cache_ttl=jwks_cache_ttl,
+            validation_cache_ttl=validation_cache_ttl,
+            validation_cache_maxsize=validation_cache_maxsize,
+            http_timeout=min(http_timeout, HTTP_MAX_TIMEOUT_SECONDS),
+            graph_api_rate_limit=graph_api_rate_limit,
+        )
 
 
 @dataclass
@@ -90,53 +185,88 @@ class EntraIdUserInfo:
         Returns:
             EntraIdUserInfo with extracted user data
         """
-        # Extract tenant ID from @odata.context if available
-        tenant_id = None
-        odata_context = graph_data.get("@odata.context", "")
-        if "/" in odata_context:
-            # Format: https://graph.microsoft.com/v1.0/$metadata#users/$entity
-            # Or: https://graph.microsoft.com/v1.0/$metadata#directoryObjects/$entity
-            # Try to extract tenant ID from userPrincipalName if available
-            upn = graph_data.get("userPrincipalName", "")
-            if "@" in upn and "#EXT#" not in upn:
-                # Extract domain, but tenant ID is not directly available from /me
-                # We'll leave it None or try to extract from other fields
-                pass
-
         return cls(
             email=graph_data.get("mail") or graph_data.get("userPrincipalName"),
             preferred_username=graph_data.get("userPrincipalName"),
             upn=graph_data.get("userPrincipalName"),
-            tenant_id=tenant_id,  # Not directly available from /me endpoint
+            tenant_id=None,  # Not directly available from /me endpoint
             object_id=graph_data.get("id"),  # Object ID in Graph API
             app_id=None,  # Not available from Graph API /me endpoint
         )
+
+
+class RateLimiter:
+    """Simple rate limiter for Graph API calls."""
+
+    def __init__(self, max_calls_per_minute: int):
+        """Initialize rate limiter.
+
+        Args:
+            max_calls_per_minute: Maximum number of calls allowed per minute
+        """
+        self.max_calls = max_calls_per_minute
+        self.calls: list[float] = []
+
+    def is_allowed(self) -> bool:
+        """Check if a call is allowed under rate limit.
+
+        Returns:
+            True if call is allowed, False otherwise
+        """
+        now = time.time()
+        # Remove calls older than 1 minute
+        self.calls = [call_time for call_time in self.calls if now - call_time < 60]
+        return len(self.calls) < self.max_calls
+
+    def record_call(self) -> None:
+        """Record a call."""
+        self.calls.append(time.time())
 
 
 class EntraIdValidator:
     """Validator for Entra ID tokens (JWT and opaque) with JWKS and Graph API support."""
 
     def __init__(self, config: EntraIdConfig):
-        self.config = config
-        # Extract tenant ID from issuer URL (format: https://login.microsoftonline.com/{tenant-id}/v2.0)
-        tenant_id = None
-        if config and config.expected_issuer:
-            parts = config.expected_issuer.rstrip("/").split("/")
-            if len(parts) >= 4:
-                tenant_id = parts[3]
+        """Initialize Entra ID validator.
+
+        Args:
+            config: Entra ID configuration
+
+        Raises:
+            ValueError: If config is None or issuer URL is invalid
+        """
+        if config is None:
+            raise ValueError("EntraIdConfig cannot be None")
         
+        self.config = config
+        # Validate and extract tenant ID from issuer URL
+        is_valid, tenant_id = _validate_issuer_url(config.expected_issuer)
+        if not is_valid:
+            raise ValueError(
+                f"Invalid Entra ID issuer URL: {config.expected_issuer}. "
+                "Expected format: https://login.microsoftonline.com/{{tenant-id}}/v2.0"
+            )
+
         # Use tenant-specific JWKS endpoint if tenant ID is available, otherwise fallback to /common/
         if tenant_id:
             self.jwks_url = f"https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys"
+            self.tenant_id = tenant_id
         else:
             self.jwks_url = "https://login.microsoftonline.com/common/discovery/v2.0/keys"
-        
-        # Cache JWKS for 24 hours
-        self.jwks_cache: TTLCache[int, Dict[str, Any]] = TTLCache(maxsize=1, ttl=86400)
-        # Cache validation results for 5 minutes
-        self.validation_cache: TTLCache[str, tuple[bool, Optional[str], Optional[EntraIdUserInfo]]] = TTLCache(
-            maxsize=100, ttl=300
+            self.tenant_id = "common"
+
+        # Cache JWKS using tenant ID as key (supports multi-tenant in future)
+        self.jwks_cache: TTLCache[str, Dict[str, Any]] = TTLCache(
+            maxsize=10, ttl=config.jwks_cache_ttl
         )
+        # Cache validation results using hashed tokens
+        self.validation_cache: TTLCache[str, tuple[bool, Optional[str], Optional[EntraIdUserInfo]]] = (
+            TTLCache(maxsize=config.validation_cache_maxsize, ttl=config.validation_cache_ttl)
+        )
+        # Rate limiter for Graph API calls
+        self.rate_limiter = RateLimiter(config.graph_api_rate_limit)
+        # HTTP client for async requests
+        self.http_client = httpx.AsyncClient(timeout=config.http_timeout)
 
     def is_entra_id_enabled(self) -> bool:
         """Check if Entra ID authentication is enabled.
@@ -146,7 +276,7 @@ class EntraIdValidator:
         """
         return self.config is not None
 
-    def _fetch_jwks(self) -> Dict[str, Any]:
+    async def _fetch_jwks(self) -> Dict[str, Any]:
         """Fetch JWKS from Microsoft's discovery endpoint.
 
         Returns:
@@ -155,7 +285,7 @@ class EntraIdValidator:
         Raises:
             ValueError: If JWKS cannot be fetched or is invalid
         """
-        cache_key = 0  # Single key since we only cache one JWKS document
+        cache_key = self.tenant_id
 
         # Check cache first
         if cache_key in self.jwks_cache:
@@ -164,7 +294,7 @@ class EntraIdValidator:
 
         try:
             logger.debug(f"Fetching JWKS from {self.jwks_url}")
-            response = requests.get(self.jwks_url, timeout=10)
+            response = await self.http_client.get(self.jwks_url)
             response.raise_for_status()
             jwks = response.json()
 
@@ -177,17 +307,21 @@ class EntraIdValidator:
             logger.debug("Successfully cached JWKS")
             return jwks
 
-        except requests.RequestException as e:
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to fetch JWKS: HTTP {e.response.status_code}")
+            raise ValueError(f"Failed to fetch JWKS: HTTP {e.response.status_code}")
+        except httpx.RequestError as e:
             logger.error(f"Failed to fetch JWKS: {e}")
             raise ValueError(f"Failed to fetch JWKS: {e}")
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in JWKS response: {e}")
             raise ValueError(f"Invalid JSON in JWKS response: {e}")
 
-    def _get_signing_key(self, kid: str) -> str:
-        """Get RSA public key for the given key ID.
+    def _get_signing_key(self, jwks: Dict[str, Any], kid: str) -> str:
+        """Get RSA public key for the given key ID from JWKS.
 
         Args:
+            jwks: JWKS document
             kid: Key ID from JWT header
 
         Returns:
@@ -196,8 +330,6 @@ class EntraIdValidator:
         Raises:
             ValueError: If key cannot be found or is invalid
         """
-        jwks = self._fetch_jwks()
-
         for key in jwks.get("keys", []):
             if key.get("kid") == kid:
                 # Extract RSA public key components
@@ -226,7 +358,7 @@ class EntraIdValidator:
                     public_key = rsa.RSAPublicNumbers(e_int, n_int).public_key()
                     pem = public_key.public_bytes(
                         encoding=serialization.Encoding.PEM,
-                        format=serialization.PublicFormat.SubjectPublicKeyInfo
+                        format=serialization.PublicFormat.SubjectPublicKeyInfo,
                     )
                     return pem.decode("utf-8")
 
@@ -236,7 +368,25 @@ class EntraIdValidator:
 
         raise ValueError(f"Unable to find signing key with kid: {kid}")
 
-    def _validate_opaque_token_via_graph(self, token: str) -> tuple[bool, Optional[str], Optional[EntraIdUserInfo]]:
+    def _cache_validation_error(
+        self, token_hash: str, error_msg: str
+    ) -> tuple[bool, Optional[str], Optional[EntraIdUserInfo]]:
+        """Cache a validation error result.
+
+        Args:
+            token_hash: Hashed token
+            error_msg: Error message (sanitized)
+
+        Returns:
+            Tuple of (False, error_msg, None)
+        """
+        result = (False, error_msg, None)
+        self.validation_cache[token_hash] = result
+        return result
+
+    async def _validate_opaque_token_via_graph(
+        self, token: str
+    ) -> tuple[bool, Optional[str], Optional[EntraIdUserInfo]]:
         """Validate opaque access token by calling Microsoft Graph API.
 
         Args:
@@ -245,6 +395,12 @@ class EntraIdValidator:
         Returns:
             Tuple of (is_valid, error_message, user_info)
         """
+        # Check rate limit
+        if not self.rate_limiter.is_allowed():
+            error_msg = ERROR_TOKEN_VALIDATION_FAILED
+            logger.warning("Graph API rate limit exceeded")
+            return False, error_msg, None
+
         try:
             # Call Microsoft Graph API /me endpoint to validate token and get user info
             graph_url = "https://graph.microsoft.com/v1.0/me"
@@ -254,16 +410,17 @@ class EntraIdValidator:
             }
 
             logger.debug("Validating opaque token via Microsoft Graph API")
-            response = requests.get(graph_url, headers=headers, timeout=10)
+            self.rate_limiter.record_call()
+            response = await self.http_client.get(graph_url, headers=headers)
 
             if response.status_code == 401:
-                error_msg = "Invalid or expired access token"
-                logger.warning(f"Graph API returned 401: {error_msg}")
+                error_msg = ERROR_INVALID_TOKEN
+                logger.warning("Graph API returned 401: Invalid or expired access token")
                 return False, error_msg, None
 
             if response.status_code == 403:
-                error_msg = "Access token lacks required permissions for Microsoft Graph API"
-                logger.warning(f"Graph API returned 403: {error_msg}")
+                error_msg = ERROR_INVALID_TOKEN
+                logger.warning("Graph API returned 403: Access token lacks required permissions")
                 return False, error_msg, None
 
             response.raise_for_status()
@@ -277,20 +434,26 @@ class EntraIdValidator:
             )
             return True, None, user_info
 
-        except requests.RequestException as e:
-            error_msg = f"Failed to validate token via Microsoft Graph API: {str(e)}"
-            logger.error(error_msg)
+        except httpx.HTTPStatusError as e:
+            error_msg = ERROR_TOKEN_VALIDATION_FAILED
+            logger.error(f"Graph API HTTP error: {e.response.status_code}")
+            return False, error_msg, None
+        except httpx.RequestError as e:
+            error_msg = ERROR_TOKEN_VALIDATION_FAILED
+            logger.error(f"Graph API request error: {e}")
             return False, error_msg, None
         except json.JSONDecodeError as e:
-            error_msg = f"Invalid JSON response from Microsoft Graph API: {str(e)}"
-            logger.error(error_msg)
+            error_msg = ERROR_TOKEN_VALIDATION_FAILED
+            logger.error(f"Invalid JSON response from Microsoft Graph API: {e}")
             return False, error_msg, None
         except Exception as e:
-            error_msg = f"Unexpected error validating token via Graph API: {str(e)}"
-            logger.error(error_msg, exc_info=True)
+            error_msg = ERROR_TOKEN_VALIDATION_FAILED
+            logger.error(f"Unexpected error validating token via Graph API: {e}", exc_info=True)
             return False, error_msg, None
 
-    def validate_token(self, token: str) -> tuple[bool, Optional[str], Optional[EntraIdUserInfo]]:
+    async def validate_token(
+        self, token: str
+    ) -> tuple[bool, Optional[str], Optional[EntraIdUserInfo]]:
         """Validate Entra ID token (JWT or opaque access token).
 
         Supports:
@@ -311,12 +474,14 @@ class EntraIdValidator:
 
         # Check for empty tokens
         if not token or not isinstance(token, str):
-            error_msg = "Token is empty or invalid format"
-            return False, error_msg, None
+            return self._cache_validation_error(_hash_token(token or ""), ERROR_INVALID_TOKEN)
+
+        # Hash token for secure caching
+        token_hash = _hash_token(token)
 
         # Check cache first
-        if token in self.validation_cache:
-            cached_result = self.validation_cache[token]
+        if token_hash in self.validation_cache:
+            cached_result = self.validation_cache[token_hash]
             logger.debug("Using cached validation result")
             return cached_result
 
@@ -327,9 +492,9 @@ class EntraIdValidator:
         if not is_jwt:
             # Opaque token - validate via Microsoft Graph API
             logger.debug("Detected opaque token, validating via Microsoft Graph API")
-            result = self._validate_opaque_token_via_graph(token)
+            result = await self._validate_opaque_token_via_graph(token)
             if result[0]:  # Cache successful validations
-                self.validation_cache[token] = result
+                self.validation_cache[token_hash] = result
             return result
 
         # JWT token - validate via JWKS
@@ -338,14 +503,13 @@ class EntraIdValidator:
             # Decode header without verification to get kid
             header = jwt.get_unverified_header(token)
             if not isinstance(header, dict) or "kid" not in header:
-                error_msg = "Invalid JWT header or missing 'kid' claim"
-                self.validation_cache[token] = (False, error_msg, None)
-                return False, error_msg, None
+                return self._cache_validation_error(token_hash, ERROR_INVALID_TOKEN)
 
             kid = header["kid"]
 
-            # Get signing key
-            signing_key = self._get_signing_key(kid)
+            # Fetch JWKS and get signing key
+            jwks = await self._fetch_jwks()
+            signing_key = self._get_signing_key(jwks, kid)
 
             # Validate token
             # For JWT tokens, try multiple audiences:
@@ -394,14 +558,12 @@ class EntraIdValidator:
                     logger.debug(
                         "JWT validation failed, attempting Graph API validation as fallback"
                     )
-                    graph_result = self._validate_opaque_token_via_graph(token)
+                    graph_result = await self._validate_opaque_token_via_graph(token)
                     if graph_result[0]:
-                        self.validation_cache[token] = graph_result
+                        self.validation_cache[token_hash] = graph_result
                         return graph_result
 
-                    error_msg = f"Invalid audience (tried: {', '.join(audiences_to_try)})"
-                    self.validation_cache[token] = (False, error_msg, None)
-                    return False, error_msg, None
+                    return self._cache_validation_error(token_hash, ERROR_INVALID_TOKEN)
                 else:
                     raise last_error
 
@@ -412,30 +574,26 @@ class EntraIdValidator:
                 f"Successfully validated JWT token for user: {user_info.email or user_info.preferred_username}"
             )
             result = (True, None, user_info)
-            self.validation_cache[token] = result
+            self.validation_cache[token_hash] = result
             return result
 
         except jwt.ExpiredSignatureError:
-            error_msg = "Token has expired"
-            self.validation_cache[token] = (False, error_msg, None)
-            return False, error_msg, None
+            return self._cache_validation_error(token_hash, ERROR_TOKEN_EXPIRED)
         except jwt.InvalidIssuerError:
-            error_msg = f"Invalid issuer (expected: {self.config.expected_issuer})"
-            self.validation_cache[token] = (False, error_msg, None)
-            return False, error_msg, None
+            logger.warning(f"Invalid issuer (expected: {self.config.expected_issuer})")
+            return self._cache_validation_error(token_hash, ERROR_INVALID_ISSUER)
         except jwt.InvalidSignatureError:
-            error_msg = "Invalid token signature"
-            self.validation_cache[token] = (False, error_msg, None)
-            return False, error_msg, None
+            return self._cache_validation_error(token_hash, ERROR_INVALID_SIGNATURE)
         except jwt.DecodeError as e:
-            error_msg = f"Failed to decode token: {str(e)}"
-            self.validation_cache[token] = (False, error_msg, None)
-            return False, error_msg, None
+            logger.debug(f"Failed to decode token: {e}")
+            return self._cache_validation_error(token_hash, ERROR_DECODE_FAILED)
         except Exception as e:
-            error_msg = f"Token validation failed: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            self.validation_cache[token] = (False, error_msg, None)
-            return False, error_msg, None
+            logger.error(f"Token validation failed: {e}", exc_info=True)
+            return self._cache_validation_error(token_hash, ERROR_TOKEN_VALIDATION_FAILED)
+
+    async def close(self) -> None:
+        """Close HTTP client."""
+        await self.http_client.aclose()
 
 
 # Global validator instance
@@ -457,7 +615,6 @@ def get_entra_id_validator() -> Optional[EntraIdValidator]:
     if config:
         _entra_id_validator = EntraIdValidator(config)
         logger.info("Entra ID authentication enabled")
-        logger.debug(f"Expected audience: {config.expected_audience}")
         logger.debug(f"Expected issuer: {config.expected_issuer}")
     else:
         logger.debug("Entra ID authentication not configured")
@@ -475,7 +632,9 @@ def is_entra_id_enabled() -> bool:
     return validator is not None and validator.is_entra_id_enabled()
 
 
-def validate_entra_id_token(token: str) -> tuple[bool, Optional[str], Optional[EntraIdUserInfo]]:
+async def validate_entra_id_token(
+    token: str,
+) -> tuple[bool, Optional[str], Optional[EntraIdUserInfo]]:
     """Validate an Entra ID token (JWT or opaque access token).
 
     Supports both JWT tokens (validated via JWKS) and opaque access tokens
@@ -494,4 +653,4 @@ def validate_entra_id_token(token: str) -> tuple[bool, Optional[str], Optional[E
     if not validator:
         return False, "Entra ID authentication not configured", None
 
-    return validator.validate_token(token)
+    return await validator.validate_token(token)
