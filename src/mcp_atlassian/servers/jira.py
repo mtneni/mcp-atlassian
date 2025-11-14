@@ -12,7 +12,7 @@ from mcp_atlassian.exceptions import MCPAtlassianAuthenticationError
 from mcp_atlassian.jira.constants import DEFAULT_READ_JIRA_FIELDS
 from mcp_atlassian.models.jira.common import JiraUser
 from mcp_atlassian.servers.dependencies import get_jira_fetcher
-from mcp_atlassian.utils.decorators import check_write_access
+from mcp_atlassian.utils.decorators import audit_tool_execution, check_write_access
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,7 @@ jira_mcp = FastMCP(
 )
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "read"})
 async def get_user_profile(
     ctx: Context,
@@ -79,6 +80,7 @@ async def get_user_profile(
     return json.dumps(response_data, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "read"})
 async def get_issue(
     ctx: Context,
@@ -162,6 +164,7 @@ async def get_issue(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "read"})
 async def search(
     ctx: Context,
@@ -249,6 +252,7 @@ async def search(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "read"})
 async def search_fields(
     ctx: Context,
@@ -283,6 +287,7 @@ async def search_fields(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "read"})
 async def get_project_issues(
     ctx: Context,
@@ -315,6 +320,7 @@ async def get_project_issues(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "read"})
 async def get_transitions(
     ctx: Context,
@@ -335,6 +341,7 @@ async def get_transitions(
     return json.dumps(transitions, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "read"})
 async def get_worklog(
     ctx: Context,
@@ -355,6 +362,7 @@ async def get_worklog(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "read"})
 async def download_attachments(
     ctx: Context,
@@ -378,6 +386,7 @@ async def download_attachments(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "read"})
 async def get_agile_boards(
     ctx: Context,
@@ -428,6 +437,7 @@ async def get_agile_boards(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "read"})
 async def get_board_issues(
     ctx: Context,
@@ -505,6 +515,7 @@ async def get_board_issues(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "read"})
 async def get_sprints_from_board(
     ctx: Context,
@@ -542,6 +553,7 @@ async def get_sprints_from_board(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "read"})
 async def get_sprint_issues(
     ctx: Context,
@@ -590,6 +602,7 @@ async def get_sprint_issues(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "read"})
 async def get_link_types(ctx: Context) -> str:
     """Get all available issue link types.
@@ -606,6 +619,7 @@ async def get_link_types(ctx: Context) -> str:
     return json.dumps(formatted_link_types, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "write"})
 @check_write_access
 async def create_issue(
@@ -711,6 +725,7 @@ async def create_issue(
     )
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "write"})
 @check_write_access
 async def batch_create_issues(
@@ -781,6 +796,7 @@ async def batch_create_issues(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "read"})
 async def batch_get_changelogs(
     ctx: Context,
@@ -853,6 +869,7 @@ async def batch_get_changelogs(
     return json.dumps(results, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "write"})
 @check_write_access
 async def update_issue(
@@ -955,6 +972,7 @@ async def update_issue(
         raise ValueError(msg)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "write"})
 @check_write_access
 async def delete_issue(
@@ -980,6 +998,7 @@ async def delete_issue(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "write"})
 @check_write_access
 async def add_comment(
@@ -1006,6 +1025,7 @@ async def add_comment(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "write"})
 @check_write_access
 async def add_worklog(
@@ -1073,6 +1093,7 @@ async def add_worklog(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "write"})
 @check_write_access
 async def link_to_epic(
@@ -1106,6 +1127,7 @@ async def link_to_epic(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "write"})
 @check_write_access
 async def create_issue_link(
@@ -1174,6 +1196,7 @@ async def create_issue_link(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "write"})
 @check_write_access
 async def create_remote_issue_link(
@@ -1256,6 +1279,7 @@ async def create_remote_issue_link(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "write"})
 @check_write_access
 async def remove_issue_link(
@@ -1282,6 +1306,7 @@ async def remove_issue_link(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "write"})
 @check_write_access
 async def transition_issue(
@@ -1355,6 +1380,7 @@ async def transition_issue(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "write"})
 @check_write_access
 async def create_sprint(
@@ -1400,6 +1426,7 @@ async def create_sprint(
     return json.dumps(sprint.to_simplified_dict(), indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "write"})
 @check_write_access
 async def update_sprint(
@@ -1458,6 +1485,7 @@ async def update_sprint(
         return json.dumps(sprint.to_simplified_dict(), indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "read"})
 async def get_project_versions(
     ctx: Context,
@@ -1469,6 +1497,7 @@ async def get_project_versions(
     return json.dumps(versions, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "read"})
 async def get_all_projects(
     ctx: Context,
@@ -1534,6 +1563,7 @@ async def get_all_projects(
     return json.dumps(projects, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @jira_mcp.tool(tags={"jira", "write"})
 @check_write_access
 async def create_version(

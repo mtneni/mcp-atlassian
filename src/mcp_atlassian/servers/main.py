@@ -39,6 +39,7 @@ from mcp_atlassian.utils.environment import get_available_services
 from mcp_atlassian.utils.io import is_read_only_mode
 from mcp_atlassian.utils.logging import mask_sensitive
 from mcp_atlassian.utils.prometheus_metrics import get_metrics, initialize_metrics
+from mcp_atlassian.utils.rate_limit import get_rate_limiter
 from mcp_atlassian.utils.tools import get_enabled_tools, should_include_tool
 
 from .bitbucket import bitbucket_mcp
@@ -73,6 +74,37 @@ async def metrics_endpoint(request: Request) -> Response:
 
     content, content_type = metrics_collector.generate_metrics()
     return Response(content, media_type=content_type)
+
+
+def _initialize_security_features() -> None:
+    """Initialize rate limiting and audit logging at module load time."""
+    try:
+        logger.info("Initializing security features...")
+        
+        # Initialize rate limiting
+        rate_limiter = get_rate_limiter()
+        if rate_limiter and rate_limiter.enabled:
+            logger.info("✓ Rate limiting enabled and initialized")
+        else:
+            logger.info("✓ Rate limiting disabled")
+        
+        # Initialize audit logging
+        audit_logger = get_audit_logger()
+        if audit_logger and audit_logger.enabled:
+            logger.info("✓ Audit logging enabled and initialized")
+            if audit_logger.output_file:
+                logger.info(f"  → Audit log file: {audit_logger.output_file}")
+            if audit_logger.output_stdout:
+                logger.info("  → Audit log output: stdout")
+            logger.info(f"  → PII masking: {'enabled' if audit_logger.mask_pii else 'disabled'}")
+        else:
+            logger.info("✓ Audit logging disabled")
+    except Exception as e:
+        logger.error(f"Error initializing security features: {e}", exc_info=True)
+
+
+# Initialize security features at module load time
+_initialize_security_features()
 
 
 @asynccontextmanager
@@ -578,6 +610,97 @@ class UserTokenMiddleware:
         if request_path == mcp_path and method == "POST":
             # Parse headers from scope (headers are byte tuples per ASGI spec)
             headers = dict(scope.get("headers", []))
+            
+            # Extract user identifier for rate limiting
+            username_header = headers.get(b"x-atlassian-username")
+            username = username_header.decode("latin-1") if username_header else None
+            username = username.lower() if username else None
+            
+            # Check rate limiting before processing request
+            rate_limiter = get_rate_limiter()
+            if rate_limiter:
+                # Extract JSON-RPC method for tool-based rate limiting
+                tool_name_for_rate_limit = None
+                try:
+                    # Peek at body to get tool name (we'll reset after)
+                    body_parts_rate = []
+                    temp_messages = []
+                    while True:
+                        message = await cached_receive()
+                        temp_messages.append(message)
+                        if message["type"] == "http.request":
+                            body_parts_rate.append(message.get("body", b""))
+                            if not message.get("more_body", False):
+                                break
+                        else:
+                            break
+                    
+                    # Restore messages to cache by resetting index
+                    message_index = 0
+                    
+                    full_body_rate = b"".join(body_parts_rate)
+                    if full_body_rate:
+                        body_data_rate = json.loads(full_body_rate.decode("utf-8"))
+                        jsonrpc_method_for_rate_limit = body_data_rate.get("method")
+                        if jsonrpc_method_for_rate_limit == "tools/call":
+                            tool_name_for_rate_limit = body_data_rate.get("params", {}).get("name")
+                except Exception as e:
+                    # If we can't parse, continue without tool-specific rate limiting
+                    logger.debug(f"Could not parse request body for rate limiting: {e}")
+                    tool_name_for_rate_limit = None
+                    # Reset message index
+                    message_index = 0
+                
+                is_allowed, error_msg, retry_after = rate_limiter.check_rate_limit(
+                    user_id=username,
+                    user_ip=client_ip,
+                    tool_name=tool_name_for_rate_limit,
+                )
+                
+                if not is_allowed:
+                    # Audit log rate limit violation
+                    audit_logger = get_audit_logger()
+                    if audit_logger:
+                        user_agent_header = headers.get(b"user-agent")
+                        user_agent = (
+                            user_agent_header.decode("latin-1") if user_agent_header else None
+                        )
+                        audit_logger.log(
+                            action=AuditAction.TOOL_DENIED,
+                            result=AuditResult.DENIED,
+                            user_id=username,
+                            user_ip=client_ip,
+                            user_agent=user_agent,
+                            request_id=request_id,
+                            tool_name=tool_name_for_rate_limit,
+                            error_message=error_msg,
+                            metadata={"rate_limit_retry_after": retry_after},
+                        )
+                    
+                    # Send 429 Too Many Requests response
+                    error_response = json.dumps(
+                        {
+                            "error": {
+                                "code": -32000,
+                                "message": error_msg or "Rate limit exceeded",
+                                "data": {"retry_after": retry_after} if retry_after else None,
+                            }
+                        }
+                    ).encode()
+                    
+                    headers_list = [(b"content-type", b"application/json")]
+                    if retry_after:
+                        headers_list.append((b"retry-after", str(retry_after).encode()))
+                    
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": 429,
+                            "headers": headers_list,
+                        }
+                    )
+                    await send({"type": "http.response.body", "body": error_response})
+                    return
             
             # Set cached_receive_func so we can use it for body parsing
             cached_receive_func = cached_receive

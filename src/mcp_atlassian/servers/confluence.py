@@ -10,6 +10,7 @@ from pydantic import BeforeValidator, Field
 from mcp_atlassian.exceptions import MCPAtlassianAuthenticationError
 from mcp_atlassian.servers.dependencies import get_confluence_fetcher
 from mcp_atlassian.utils.decorators import (
+    audit_tool_execution,
     check_write_access,
 )
 
@@ -20,6 +21,7 @@ confluence_mcp = FastMCP(
 )
 
 
+@audit_tool_execution
 @confluence_mcp.tool(tags={"confluence", "read"})
 async def search(
     ctx: Context,
@@ -109,6 +111,7 @@ async def search(
     return json.dumps(search_results, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @confluence_mcp.tool(tags={"confluence", "read"})
 async def get_page(
     ctx: Context,
@@ -237,6 +240,7 @@ async def get_page(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @confluence_mcp.tool(tags={"confluence", "read"})
 async def get_page_children(
     ctx: Context,
@@ -325,6 +329,7 @@ async def get_page_children(
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @confluence_mcp.tool(tags={"confluence", "read"})
 async def get_comments(
     ctx: Context,
@@ -354,6 +359,7 @@ async def get_comments(
     return json.dumps(formatted_comments, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @confluence_mcp.tool(tags={"confluence", "read"})
 async def get_labels(
     ctx: Context,
@@ -383,6 +389,7 @@ async def get_labels(
     return json.dumps(formatted_labels, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @confluence_mcp.tool(tags={"confluence", "write"})
 @check_write_access
 async def add_label(
@@ -409,6 +416,7 @@ async def add_label(
     return json.dumps(formatted_labels, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @confluence_mcp.tool(tags={"confluence", "write"})
 @check_write_access
 async def create_page(
@@ -500,6 +508,7 @@ async def create_page(
     )
 
 
+@audit_tool_execution
 @confluence_mcp.tool(tags={"confluence", "write"})
 @check_write_access
 async def update_page(
@@ -593,6 +602,7 @@ async def update_page(
     )
 
 
+@audit_tool_execution
 @confluence_mcp.tool(tags={"confluence", "write"})
 @check_write_access
 async def delete_page(
@@ -635,6 +645,7 @@ async def delete_page(
     return json.dumps(response, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @confluence_mcp.tool(tags={"confluence", "write"})
 @check_write_access
 async def add_comment(
@@ -685,6 +696,7 @@ async def add_comment(
     return json.dumps(response, indent=2, ensure_ascii=False)
 
 
+@audit_tool_execution
 @confluence_mcp.tool(tags={"confluence", "read"})
 async def search_user(
     ctx: Context,

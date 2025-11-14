@@ -1047,6 +1047,43 @@ AUDIT_LOG_RETENTION_DAYS=90
 - SOC 2: Comprehensive audit trail
 - HIPAA: Data classification and retention policies
 
+### Rate Limiting & Abuse Prevention
+
+**Enhanced Rate Limiting** for abuse prevention and DoS protection:
+- Per-user rate limiting
+- Per-IP rate limiting
+- Per-tool rate limiting
+- Configurable limits via environment variables
+- Automatic audit logging of rate limit violations
+
+**Configuration**:
+```bash
+# Enable rate limiting (default: true)
+RATE_LIMIT_ENABLED=true
+
+# Default requests per window (default: 100)
+RATE_LIMIT_REQUESTS=100
+
+# Time window in seconds (default: 60)
+RATE_LIMIT_WINDOW_SECONDS=60
+
+# Per-user requests per window (default: 50)
+RATE_LIMIT_USER_REQUESTS=50
+
+# Per-IP requests per window (default: 200)
+RATE_LIMIT_IP_REQUESTS=200
+
+# Per-tool requests per window (default: 30)
+RATE_LIMIT_TOOL_REQUESTS=30
+```
+
+**Rate Limit Behavior**:
+- Returns HTTP 429 (Too Many Requests) when limit exceeded
+- Includes `Retry-After` header with seconds to wait
+- Rate limit violations are automatically logged to audit trail
+- Separate limits for users, IPs, and individual tools
+- TTL-based sliding window (requests reset after window expires)
+
 ## Tools
 
 ### Key Tools

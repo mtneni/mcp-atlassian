@@ -10,13 +10,14 @@ from requests.exceptions import HTTPError
 
 from mcp_atlassian.exceptions import MCPAtlassianAuthenticationError
 from mcp_atlassian.servers.dependencies import get_bitbucket_fetcher
-from mcp_atlassian.utils.decorators import check_write_access
+from mcp_atlassian.utils.decorators import audit_tool_execution, check_write_access
 
 logger = logging.getLogger(__name__)
 
 bitbucket_mcp = FastMCP(name="Bitbucket MCP Service")
 
 
+@audit_tool_execution
 @bitbucket_mcp.tool(tags={"bitbucket", "read"})
 async def list_workspaces_or_projects(ctx: Context) -> str:
     """
@@ -57,6 +58,7 @@ async def list_workspaces_or_projects(ctx: Context) -> str:
         return json.dumps(error_result, indent=2)
 
 
+@audit_tool_execution
 @bitbucket_mcp.tool(tags={"bitbucket", "read"})
 async def list_repositories(
     ctx: Context,
@@ -109,6 +111,7 @@ async def list_repositories(
         return json.dumps(error_result, indent=2)
 
 
+@audit_tool_execution
 @bitbucket_mcp.tool(tags={"bitbucket", "read"})
 async def get_repository_info(
     ctx: Context,
@@ -162,6 +165,7 @@ async def get_repository_info(
         return json.dumps(error_result, indent=2)
 
 
+@audit_tool_execution
 @bitbucket_mcp.tool(tags={"bitbucket", "read"})
 async def list_branches(
     ctx: Context,
@@ -239,6 +243,7 @@ async def list_branches(
         return json.dumps(error_result, indent=2)
 
 
+@audit_tool_execution
 @bitbucket_mcp.tool(tags={"bitbucket", "read"})
 async def get_default_branch(
     ctx: Context,
@@ -294,6 +299,7 @@ async def get_default_branch(
         return json.dumps(error_result, indent=2)
 
 
+@audit_tool_execution
 @bitbucket_mcp.tool(tags={"bitbucket", "read"})
 async def get_file_content(
     ctx: Context,
@@ -373,6 +379,7 @@ async def get_file_content(
         return json.dumps(error_result, indent=2)
 
 
+@audit_tool_execution
 @bitbucket_mcp.tool(tags={"bitbucket", "read"})
 async def list_directory(
     ctx: Context,
@@ -435,6 +442,7 @@ async def list_directory(
         return json.dumps(error_result, indent=2)
 
 
+@audit_tool_execution
 @bitbucket_mcp.tool(tags={"bitbucket", "read"})
 async def list_pull_requests(
     ctx: Context,
@@ -490,6 +498,7 @@ async def list_pull_requests(
         return json.dumps(error_result, indent=2)
 
 
+@audit_tool_execution
 @bitbucket_mcp.tool(tags={"bitbucket", "read"})
 async def pull_request_activities(
     ctx: Context,
@@ -546,6 +555,7 @@ async def pull_request_activities(
         return json.dumps(error_result, indent=2)
 
 
+@audit_tool_execution
 @bitbucket_mcp.tool(tags={"bitbucket", "read"})
 async def get_pull_request(
     ctx: Context,
@@ -604,6 +614,7 @@ async def get_pull_request(
         return json.dumps(error_result, indent=2)
 
 
+@audit_tool_execution
 @bitbucket_mcp.tool(tags={"bitbucket", "read"})
 async def get_commit_changes(
     ctx: Context,
@@ -674,6 +685,7 @@ async def get_commit_changes(
         return json.dumps(error_result, indent=2)
 
 
+@audit_tool_execution
 @bitbucket_mcp.tool(tags={"bitbucket", "read"})
 async def get_commits(
     ctx: Context,
@@ -748,6 +760,7 @@ async def get_commits(
         return json.dumps(error_result, indent=2)
 
 
+@audit_tool_execution
 @bitbucket_mcp.tool(tags={"bitbucket", "write"})
 @check_write_access
 async def create_pull_request(
@@ -852,6 +865,7 @@ async def create_pull_request(
         return json.dumps(error_result, indent=2)
 
 
+@audit_tool_execution
 @bitbucket_mcp.tool(tags={"bitbucket", "write"})
 @check_write_access
 async def create_branch(
@@ -926,6 +940,7 @@ async def create_branch(
         return json.dumps(error_result, indent=2)
 
 
+@audit_tool_execution
 @bitbucket_mcp.tool(tags={"bitbucket", "write"})
 @check_write_access
 async def add_pull_request_blocker_comment(
@@ -1007,6 +1022,7 @@ async def add_pull_request_blocker_comment(
         return json.dumps(error_result, indent=2)
 
 
+@audit_tool_execution
 @bitbucket_mcp.tool(tags={"bitbucket", "write"})
 @check_write_access
 async def add_pull_request_comment(

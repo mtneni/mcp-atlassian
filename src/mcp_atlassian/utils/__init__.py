@@ -15,6 +15,11 @@ from .logging import setup_logging
 
 # Export OAuth utilities
 from .oauth import OAuthConfig, configure_oauth_session
+from .rate_limit import (
+    RateLimiter,
+    get_rate_limiter,
+    is_rate_limiting_enabled,
+)
 from .ssl import SSLIgnoreAdapter, configure_ssl_verification
 from .urls import is_atlassian_cloud_url
 
@@ -30,4 +35,8 @@ __all__ = [
     "configure_oauth_session",
     "setup_signal_handlers",
     "ensure_clean_exit",
+    # Rate limiting exports
+    "RateLimiter",
+    "get_rate_limiter",
+    "is_rate_limiting_enabled",
 ]
