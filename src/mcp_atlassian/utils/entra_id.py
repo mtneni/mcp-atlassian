@@ -120,7 +120,7 @@ class EntraIdValidator:
         self.config = config
         # Extract tenant ID from issuer URL (format: https://login.microsoftonline.com/{tenant-id}/v2.0)
         tenant_id = None
-        if config.expected_issuer:
+        if config and config.expected_issuer:
             parts = config.expected_issuer.rstrip("/").split("/")
             if len(parts) >= 4:
                 tenant_id = parts[3]

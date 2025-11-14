@@ -52,7 +52,7 @@ def test_from_env_missing_cloud_auth():
     ):
         with pytest.raises(
             ValueError,
-            match="Cloud authentication requires CONFLUENCE_USERNAME and CONFLUENCE_API_TOKEN",
+            match="Cloud authentication requires.*CONFLUENCE_USERNAME.*CONFLUENCE_API_TOKEN.*or.*CONFLUENCE_PERSONAL_TOKEN",
         ):
             ConfluenceConfig.from_env()
 

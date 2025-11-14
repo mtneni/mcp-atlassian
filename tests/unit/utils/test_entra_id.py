@@ -157,7 +157,9 @@ class TestEntraIdValidator:
         config = EntraIdConfig("test-audience", "test-issuer")
         validator = EntraIdValidator(config)
 
-        is_valid, error_msg, user_info = validator.validate_token("test-token")
+        # Use a JWT-formatted token (3 parts separated by dots) to ensure it's detected as JWT
+        jwt_token = "header.payload.signature"
+        is_valid, error_msg, user_info = validator.validate_token(jwt_token)
 
         assert is_valid is True
         assert error_msg is None

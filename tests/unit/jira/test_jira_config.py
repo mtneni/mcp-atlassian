@@ -74,7 +74,7 @@ def test_from_env_missing_cloud_auth():
     ):
         with pytest.raises(
             ValueError,
-            match="Cloud authentication requires JIRA_USERNAME and JIRA_API_TOKEN",
+            match="Cloud authentication requires.*JIRA_USERNAME.*JIRA_API_TOKEN.*or.*JIRA_PERSONAL_TOKEN",
         ):
             JiraConfig.from_env()
 
