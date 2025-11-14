@@ -1,6 +1,7 @@
-"""Dependency providers for JiraFetcher, ConfluenceFetcher, and BitbucketFetcher with context awareness.
+"""Dependency providers for JiraFetcher, ConfluenceFetcher, and BitbucketFetcher.
 
-Provides get_jira_fetcher, get_confluence_fetcher, and get_bitbucket_fetcher for use in tool functions.
+Provides get_jira_fetcher, get_confluence_fetcher, and get_bitbucket_fetcher
+for use in tool functions with context awareness.
 """
 
 from __future__ import annotations
@@ -42,7 +43,8 @@ def _create_user_config_for_fetcher(
     """Create a user-specific configuration for Jira, Confluence, or Bitbucket fetchers.
 
     Args:
-        base_config: The base JiraConfig, ConfluenceConfig, or BitbucketConfig to clone and modify.
+        base_config: The base JiraConfig, ConfluenceConfig, or BitbucketConfig
+            to clone and modify.
         auth_type: The authentication type ('oauth' or 'pat').
         credentials: Dictionary of credentials (token, email, etc).
         cloud_id: Optional cloud ID to override the base config cloud ID.
@@ -210,17 +212,17 @@ async def get_jira_fetcher(ctx: Context) -> JiraFetcher:
             hasattr(request.state, "entra_id_user_info")
             and request.state.entra_id_user_info is not None
         )
-        
+
         # When Entra ID is enabled, any 'oauth' auth_type without cloud_id indicates Entra ID token (not Atlassian OAuth)
         # Entra ID tokens are Bearer tokens that authenticate to the MCP server, not Atlassian services
         user_auth_type_check = getattr(request.state, "user_atlassian_auth_type", None)
         has_cloud_id = hasattr(request.state, "user_atlassian_cloud_id") and getattr(request.state, "user_atlassian_cloud_id", None) is not None
-        
+
         is_entra_id_auth = (
-            is_entra_id_enabled() 
+            is_entra_id_enabled()
             and (entra_id_used or (user_auth_type_check == "oauth" and not has_cloud_id))
         )
-        
+
         logger.debug(
             f"get_jira_fetcher: Entra ID check - enabled={is_entra_id_enabled()}, "
             f"entra_id_used={entra_id_used}, user_auth_type={user_auth_type_check}, "
@@ -238,7 +240,7 @@ async def get_jira_fetcher(ctx: Context) -> JiraFetcher:
                 if isinstance(lifespan_ctx_dict_entra, dict)
                 else None
             )
-            
+
             # Fallback: Load config directly if lifespan context is not available
             if not app_lifespan_ctx_entra or not app_lifespan_ctx_entra.full_jira_config:
                 logger.warning(
@@ -258,7 +260,7 @@ async def get_jira_fetcher(ctx: Context) -> JiraFetcher:
                             return JiraFetcher(config=jira_config)
                 except Exception as e:
                     logger.error(f"Failed to load Jira config as fallback for Entra ID: {e}", exc_info=True)
-            
+
             if app_lifespan_ctx_entra and app_lifespan_ctx_entra.full_jira_config:
                 logger.debug(
                     "get_jira_fetcher: Using global JiraFetcher for Entra ID authenticated request"
@@ -322,18 +324,14 @@ async def get_jira_fetcher(ctx: Context) -> JiraFetcher:
 
             if not user_token:
                 raise ValueError("User Atlassian token found in state but is empty.")
-            credentials = {"user_email_context": user_email}
-            if user_auth_type == "oauth":
-                credentials["oauth_access_token"] = user_token
-            elif user_auth_type == "pat":
-                credentials["personal_access_token"] = user_token
+
             lifespan_ctx_dict = ctx.request_context.lifespan_context  # type: ignore
             app_lifespan_ctx: MainAppContext | None = (
                 lifespan_ctx_dict.get("app_lifespan_context")
                 if isinstance(lifespan_ctx_dict, dict)
                 else None
             )
-            
+
             # Fallback: Load config directly if lifespan context is not available
             if not app_lifespan_ctx or not app_lifespan_ctx.full_jira_config:
                 logger.warning(
@@ -368,18 +366,38 @@ async def get_jira_fetcher(ctx: Context) -> JiraFetcher:
                     raise ValueError(
                         "Jira global configuration (URL, SSL) is not available from lifespan context."
                     ) from e
-            
+
             if not app_lifespan_ctx or not app_lifespan_ctx.full_jira_config:
                 raise ValueError(
                     "Jira global configuration (URL, SSL) is not available from lifespan context."
                 )
+
+            # Check if user_auth_type is "oauth" but base config only has PAT
+            # In this case, treat the Bearer token as a PAT token
+            base_config = app_lifespan_ctx.full_jira_config
+            if (
+                user_auth_type == "oauth"
+                and base_config.auth_type == "pat"
+                and not base_config.oauth_config
+            ):
+                logger.info(
+                    "User provided Bearer token but server only has PAT configured. "
+                    "Treating Bearer token as PAT token."
+                )
+                user_auth_type = "pat"
+
+            credentials = {"user_email_context": user_email}
+            if user_auth_type == "oauth":
+                credentials["oauth_access_token"] = user_token
+            elif user_auth_type == "pat":
+                credentials["personal_access_token"] = user_token
 
             cloud_id_info = f" with cloudId {user_cloud_id}" if user_cloud_id else ""
             logger.info(
                 f"Creating user-specific JiraFetcher (type: {user_auth_type}) for user {user_email or 'unknown'} (token ...{str(user_token)[-8:]}){cloud_id_info}"
             )
             user_specific_config = _create_user_config_for_fetcher(
-                base_config=app_lifespan_ctx.full_jira_config,
+                base_config=base_config,
                 auth_type=user_auth_type,
                 credentials=credentials,
                 cloud_id=user_cloud_id,
@@ -414,7 +432,7 @@ async def get_jira_fetcher(ctx: Context) -> JiraFetcher:
         if isinstance(lifespan_ctx_dict_global, dict)
         else None
     )
-    
+
     # Fallback: Load config directly if lifespan context is not available
     if not app_lifespan_ctx_global or not app_lifespan_ctx_global.full_jira_config:
         logger.warning(
@@ -434,7 +452,7 @@ async def get_jira_fetcher(ctx: Context) -> JiraFetcher:
                     return JiraFetcher(config=jira_config)
         except Exception as e:
             logger.error(f"Failed to load Jira config as fallback: {e}", exc_info=True)
-    
+
     if app_lifespan_ctx_global and app_lifespan_ctx_global.full_jira_config:
         logger.debug(
             "get_jira_fetcher: Using global JiraFetcher from lifespan_context. "
@@ -482,17 +500,17 @@ async def get_confluence_fetcher(ctx: Context) -> ConfluenceFetcher:
             hasattr(request.state, "entra_id_user_info")
             and request.state.entra_id_user_info is not None
         )
-        
+
         # When Entra ID is enabled, any 'oauth' auth_type without cloud_id indicates Entra ID token (not Atlassian OAuth)
         # Entra ID tokens are Bearer tokens that authenticate to the MCP server, not Atlassian services
         user_auth_type_check = getattr(request.state, "user_atlassian_auth_type", None)
         has_cloud_id = hasattr(request.state, "user_atlassian_cloud_id") and getattr(request.state, "user_atlassian_cloud_id", None) is not None
-        
+
         is_entra_id_auth = (
-            is_entra_id_enabled() 
+            is_entra_id_enabled()
             and (entra_id_used or (user_auth_type_check == "oauth" and not has_cloud_id))
         )
-        
+
         logger.debug(
             f"get_confluence_fetcher: Entra ID check - enabled={is_entra_id_enabled()}, "
             f"entra_id_used={entra_id_used}, user_auth_type={user_auth_type_check}, "
@@ -510,7 +528,7 @@ async def get_confluence_fetcher(ctx: Context) -> ConfluenceFetcher:
                 if isinstance(lifespan_ctx_dict_entra, dict)
                 else None
             )
-            
+
             # Fallback: Load config directly if lifespan context is not available
             if not app_lifespan_ctx_entra or not app_lifespan_ctx_entra.full_confluence_config:
                 logger.warning(
@@ -530,7 +548,7 @@ async def get_confluence_fetcher(ctx: Context) -> ConfluenceFetcher:
                             return ConfluenceFetcher(config=confluence_config)
                 except Exception as e:
                     logger.error(f"Failed to load Confluence config as fallback for Entra ID: {e}", exc_info=True)
-            
+
             if app_lifespan_ctx_entra and app_lifespan_ctx_entra.full_confluence_config:
                 logger.debug(
                     "get_confluence_fetcher: Using global ConfluenceFetcher for Entra ID authenticated request"
@@ -614,18 +632,14 @@ async def get_confluence_fetcher(ctx: Context) -> ConfluenceFetcher:
 
             if not user_token:
                 raise ValueError("User Atlassian token found in state but is empty.")
-            credentials = {"user_email_context": user_email}
-            if user_auth_type == "oauth":
-                credentials["oauth_access_token"] = user_token
-            elif user_auth_type == "pat":
-                credentials["personal_access_token"] = user_token
+
             lifespan_ctx_dict = ctx.request_context.lifespan_context  # type: ignore
             app_lifespan_ctx: MainAppContext | None = (
                 lifespan_ctx_dict.get("app_lifespan_context")
                 if isinstance(lifespan_ctx_dict, dict)
                 else None
             )
-            
+
             # Fallback: Load config directly if lifespan context is not available
             if not app_lifespan_ctx or not app_lifespan_ctx.full_confluence_config:
                 logger.warning(
@@ -660,18 +674,38 @@ async def get_confluence_fetcher(ctx: Context) -> ConfluenceFetcher:
                     raise ValueError(
                         "Confluence global configuration (URL, SSL) is not available from lifespan context."
                     ) from e
-            
+
             if not app_lifespan_ctx or not app_lifespan_ctx.full_confluence_config:
                 raise ValueError(
                     "Confluence global configuration (URL, SSL) is not available from lifespan context."
                 )
+
+            # Check if user_auth_type is "oauth" but base config only has PAT
+            # In this case, treat the Bearer token as a PAT token
+            base_config = app_lifespan_ctx.full_confluence_config
+            if (
+                user_auth_type == "oauth"
+                and base_config.auth_type == "pat"
+                and not base_config.oauth_config
+            ):
+                logger.info(
+                    "User provided Bearer token but server only has PAT configured. "
+                    "Treating Bearer token as PAT token."
+                )
+                user_auth_type = "pat"
+
+            credentials = {"user_email_context": user_email}
+            if user_auth_type == "oauth":
+                credentials["oauth_access_token"] = user_token
+            elif user_auth_type == "pat":
+                credentials["personal_access_token"] = user_token
 
             cloud_id_info = f" with cloudId {user_cloud_id}" if user_cloud_id else ""
             logger.info(
                 f"Creating user-specific ConfluenceFetcher (type: {user_auth_type}) for user {user_email or 'unknown'} (token ...{str(user_token)[-8:]}){cloud_id_info}"
             )
             user_specific_config = _create_user_config_for_fetcher(
-                base_config=app_lifespan_ctx.full_confluence_config,
+                base_config=base_config,
                 auth_type=user_auth_type,
                 credentials=credentials,
                 cloud_id=user_cloud_id,
@@ -723,7 +757,7 @@ async def get_confluence_fetcher(ctx: Context) -> ConfluenceFetcher:
         if isinstance(lifespan_ctx_dict_global, dict)
         else None
     )
-    
+
     # Fallback: Load config directly if lifespan context is not available
     if not app_lifespan_ctx_global or not app_lifespan_ctx_global.full_confluence_config:
         logger.warning(
@@ -743,7 +777,7 @@ async def get_confluence_fetcher(ctx: Context) -> ConfluenceFetcher:
                     return ConfluenceFetcher(config=confluence_config)
         except Exception as e:
             logger.error(f"Failed to load Confluence config as fallback: {e}", exc_info=True)
-    
+
     if app_lifespan_ctx_global and app_lifespan_ctx_global.full_confluence_config:
         logger.debug(
             "get_confluence_fetcher: Using global ConfluenceFetcher from lifespan_context. "
@@ -931,10 +965,12 @@ async def get_bitbucket_fetcher(ctx: Context) -> BitbucketFetcher:
     if app_lifespan_ctx_global and app_lifespan_ctx_global.full_bitbucket_config:
         logger.debug(
             "get_bitbucket_fetcher: Using global BitbucketFetcher from lifespan_context. "
-            f"Global config auth_type: {app_lifespan_ctx_global.full_bitbucket_config.auth_type}"
+            f"Global config auth_type: "
+            f"{app_lifespan_ctx_global.full_bitbucket_config.auth_type}"
         )
         return BitbucketFetcher(config=app_lifespan_ctx_global.full_bitbucket_config)
     logger.error("Bitbucket configuration could not be resolved.")
     raise ValueError(
-        "Bitbucket client (fetcher) not available. Ensure server is configured correctly."
+        "Bitbucket client (fetcher) not available. "
+        "Ensure server is configured correctly."
     )

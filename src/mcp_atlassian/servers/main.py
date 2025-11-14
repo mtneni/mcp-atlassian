@@ -47,6 +47,7 @@ from .bitbucket import bitbucket_mcp
 from .confluence import confluence_mcp
 from .context import MainAppContext
 from .jira import jira_mcp
+from .oauth_dcr import authorize, callback, oauth_metadata, register_client, token
 
 logger = logging.getLogger("mcp-atlassian.server.main")
 
@@ -1210,25 +1211,45 @@ class UserTokenMiddleware:
                     scope_copy["state"]["mcp_session_id"] = mcp_session_id
 
             if auth_header_str and auth_header_str.startswith("Bearer "):
-                token = auth_header_str.split(" ", 1)[1].strip()
-                if not token:
-                    # Send 401 response for empty Bearer token
-                    await self._send_error_response(
-                        send, "Unauthorized: Empty Bearer token", 401
+                # Check if Entra ID authentication was already used (for tools/call requests)
+                # If so, don't treat this Bearer token as an Atlassian OAuth token
+                # Check both scope_copy state and the original scope state
+                state_dict = scope_copy.get("state", {})
+                original_state = scope.get("state", {})
+                entra_id_already_used = (
+                    entra_id_enabled 
+                    and jsonrpc_method == "tools/call"
+                    and (
+                        "entra_id_user_info" in state_dict 
+                        or "entra_id_user_info" in original_state
                     )
-                    return
+                )
+                
+                if entra_id_already_used:
+                    logger.debug(
+                        "UserTokenMiddleware.__call__: Entra ID authentication already used, "
+                        "skipping Bearer token processing for Atlassian OAuth"
+                    )
+                else:
+                    token = auth_header_str.split(" ", 1)[1].strip()
+                    if not token:
+                        # Send 401 response for empty Bearer token
+                        await self._send_error_response(
+                            send, "Unauthorized: Empty Bearer token", 401
+                        )
+                        return
 
-                logger.debug(
-                    f"UserTokenMiddleware.__call__: Bearer token extracted "
-                    f"(masked): ...{mask_sensitive(token, 8)}"
-                )
-                scope_copy["state"]["user_atlassian_token"] = token
-                scope_copy["state"]["user_atlassian_auth_type"] = "oauth"
-                scope_copy["state"]["user_atlassian_email"] = None
-                logger.debug(
-                    f"UserTokenMiddleware.__call__: Set scope state (pre-validation): "
-                    f"auth_type='oauth', token_present={bool(token)}"
-                )
+                    logger.debug(
+                        f"UserTokenMiddleware.__call__: Bearer token extracted "
+                        f"(masked): ...{mask_sensitive(token, 8)}"
+                    )
+                    scope_copy["state"]["user_atlassian_token"] = token
+                    scope_copy["state"]["user_atlassian_auth_type"] = "oauth"
+                    scope_copy["state"]["user_atlassian_email"] = None
+                    logger.debug(
+                        f"UserTokenMiddleware.__call__: Set scope state (pre-validation): "
+                        f"auth_type='oauth', token_present={bool(token)}"
+                    )
             elif auth_header_str and auth_header_str.startswith("Token "):
                 token = auth_header_str.split(" ", 1)[1].strip()
                 if not token:
@@ -1367,3 +1388,82 @@ async def _health_check_route(request: Request) -> JSONResponse:
 async def _ready_check_route(request: Request) -> JSONResponse:
     """Readiness check for Kubernetes probes."""
     return JSONResponse({"status": "ready", "server": "mcp-atlassian"})
+
+
+# OAuth 2.0 Dynamic Client Registration endpoints
+@main_mcp.custom_route("/oauth/register", methods=["POST", "OPTIONS"], include_in_schema=False)
+async def _oauth_register_route(request: Request) -> Response:
+    """OAuth 2.0 Dynamic Client Registration endpoint (RFC 7591)."""
+    if request.method == "OPTIONS":
+        # Handle CORS preflight
+        response = Response()
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        return response
+    return await register_client(request)
+
+
+@main_mcp.custom_route("/oauth/authorize", methods=["GET", "OPTIONS"], include_in_schema=False)
+async def _oauth_authorize_route(request: Request) -> Response:
+    """OAuth 2.0 authorization endpoint."""
+    if request.method == "OPTIONS":
+        # Handle CORS preflight
+        response = Response()
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        return response
+    return await authorize(request)
+
+
+@main_mcp.custom_route("/oauth/callback", methods=["GET", "OPTIONS"], include_in_schema=False)
+async def _oauth_callback_route(request: Request) -> Response:
+    """OAuth 2.0 callback endpoint."""
+    if request.method == "OPTIONS":
+        # Handle CORS preflight
+        response = Response()
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        return response
+    return await callback(request)
+
+
+@main_mcp.custom_route("/oauth/token", methods=["POST", "OPTIONS"], include_in_schema=False)
+async def _oauth_token_route(request: Request) -> Response:
+    """OAuth 2.0 token endpoint."""
+    if request.method == "OPTIONS":
+        # Handle CORS preflight
+        response = Response()
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        return response
+    return await token(request)
+
+
+@main_mcp.custom_route("/.well-known/oauth-authorization-server", methods=["GET", "OPTIONS"], include_in_schema=False)
+async def _oauth_metadata_route(request: Request) -> Response:
+    """OAuth 2.0 Authorization Server Metadata endpoint (RFC 8414)."""
+    if request.method == "OPTIONS":
+        # Handle CORS preflight
+        response = Response()
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        return response
+    return await oauth_metadata(request)
+
+
+@main_mcp.custom_route("/mcp/.well-known/oauth-authorization-server", methods=["GET", "OPTIONS"], include_in_schema=False)
+async def _oauth_metadata_route_mcp(request: Request) -> Response:
+    """OAuth 2.0 Authorization Server Metadata endpoint (RFC 8414) at /mcp path."""
+    if request.method == "OPTIONS":
+        # Handle CORS preflight
+        response = Response()
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        return response
+    return await oauth_metadata(request)

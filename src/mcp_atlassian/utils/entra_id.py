@@ -561,10 +561,13 @@ class EntraIdValidator:
                     break
 
             if payload is None:
-                if isinstance(last_error, jwt.InvalidAudienceError):
-                    # If JWT validation fails, try Graph API as fallback for access tokens
+                # If JWT validation fails (audience mismatch or signature error), 
+                # try Graph API as fallback for access tokens
+                # This handles Microsoft Graph access tokens that may not validate via JWKS
+                if isinstance(last_error, (jwt.InvalidAudienceError, jwt.InvalidSignatureError)):
                     logger.debug(
-                        "JWT validation failed, attempting Graph API validation as fallback"
+                        f"JWT validation failed ({type(last_error).__name__}), "
+                        "attempting Graph API validation as fallback"
                     )
                     graph_result = await self._validate_opaque_token_via_graph(token)
                     if graph_result[0]:
